@@ -6,6 +6,7 @@ import {
   assertPublicApiKey,
   decideVaultSelection,
   looksLikeSecretKey,
+  sessionSecretId,
   type StoredSession,
   type VaultInfo,
 } from "@supasync/client";
@@ -52,10 +53,17 @@ export default class SupaSyncPlugin extends Plugin {
   private debounceTimer?: number;
   private boundStoreId: string | null = null;
   private booting = false;
+  private auth?: PasswordAuth;
+  private authConnection = "";
+  private settingTab?: SupaSyncSettingTab;
+  private cycleInFlight?: Promise<void>;
+  private disconnecting = false;
+  authMessage = "";
 
   override async onload(): Promise<void> {
     await this.loadSettings();
-    this.addSettingTab(new SupaSyncSettingTab(this.app, this));
+    this.settingTab = new SupaSyncSettingTab(this.app, this);
+    this.addSettingTab(this.settingTab);
     this.addRibbonIcon("sync", "SupaSync: sync now", () => {
       void this.syncNow();
     });
@@ -106,13 +114,15 @@ export default class SupaSyncPlugin extends Plugin {
     });
     this.registerInterval(
       window.setInterval(() => {
-        if (document.visibilityState === "visible" && this.settings.autoSync && !this.paused) void this.syncNow();
+        if (!this.busy && document.visibilityState === "visible" && this.settings.autoSync && !this.paused) void this.syncNow();
       }, DEFAULT_LIMITS.pollIntervalMs),
     );
   }
 
   override onunload(): void {
     window.clearTimeout(this.debounceTimer);
+    this.resetEngine();
+    this.pendingPassword = "";
   }
 
   async loadSettings(): Promise<void> {
@@ -136,13 +146,15 @@ export default class SupaSyncPlugin extends Plugin {
       new Notice("Enter an email and password.");
       return;
     }
+    this.authMessage = "";
     try {
       const result = await this.getAuth().signUp(this.settings.email, this.pendingPassword);
       this.pendingPassword = "";
       if (result.status === "confirmation_required") {
         this.signedInEmail = null;
         this.lastStatus = "Confirm email";
-        new Notice("Check your email to confirm the account, then sign in.");
+        this.authMessage = "Check your email to confirm the account, then sign in here.";
+        new Notice(this.authMessage);
         return;
       }
       this.signedInEmail = result.session.email;
@@ -150,6 +162,8 @@ export default class SupaSyncPlugin extends Plugin {
       await this.afterAuthentication();
     } catch (error) {
       this.fail(error, "Could not create the account");
+    } finally {
+      this.pendingPassword = "";
     }
   }
 
@@ -159,6 +173,7 @@ export default class SupaSyncPlugin extends Plugin {
       new Notice("Enter an email and password.");
       return;
     }
+    this.authMessage = "";
     try {
       const session = await this.getAuth().signIn(this.settings.email, this.pendingPassword);
       this.pendingPassword = "";
@@ -167,16 +182,29 @@ export default class SupaSyncPlugin extends Plugin {
       await this.afterAuthentication();
     } catch (error) {
       this.fail(error, "Could not sign in");
+    } finally {
+      this.pendingPassword = "";
     }
   }
 
   async signOut(): Promise<void> {
-    await this.getAuth().signOut();
+    this.disconnecting = true;
     this.resetEngine();
-    this.signedInEmail = null;
-    this.remoteVaults = [];
-    this.lastStatus = "Signed out";
-    new Notice("SupaSync signed out. Local files were not deleted.");
+    await this.cycleInFlight;
+    try {
+      await this.getAuth().signOut();
+      this.authMessage = "Signed out. Your local notes are still here.";
+    } catch {
+      this.authMessage = "Signed out locally. Server session revocation could not be confirmed.";
+    } finally {
+      this.signedInEmail = null;
+      this.remoteVaults = [];
+      this.pendingPassword = "";
+      this.disconnecting = false;
+      this.lastStatus = "Signed out";
+      new Notice(this.authMessage);
+      this.settingTab?.display();
+    }
   }
 
   async refreshVaults(): Promise<VaultInfo[]> {
@@ -208,8 +236,9 @@ export default class SupaSyncPlugin extends Plugin {
   }
 
   async syncNow(): Promise<void> {
+    if (this.booting || this.disconnecting) return;
     if (!this.engine) {
-      await this.boot();
+      await this.boot(true);
       return;
     }
     if (this.paused) return;
@@ -230,26 +259,28 @@ export default class SupaSyncPlugin extends Plugin {
     return parts.filter(Boolean).join(" · ");
   }
 
-  private async boot(): Promise<void> {
-    if (this.booting) return;
+  private async boot(forceSync = false): Promise<void> {
+    if (this.booting || this.disconnecting) return;
     this.booting = true;
     try {
       if (!this.ensureConnection(false)) return;
       const session = await this.readSession();
       if (!session) {
+        this.signedInEmail = null;
         this.lastStatus = "Needs sign-in";
         return;
       }
       this.signedInEmail = session.email;
-      await this.afterAuthentication();
+      await this.afterAuthentication(forceSync);
     } catch (error) {
       this.fail(error, "Could not start SupaSync");
     } finally {
       this.booting = false;
+      this.settingTab?.display();
     }
   }
 
-  private async afterAuthentication(): Promise<void> {
+  private async afterAuthentication(forceSync = false): Promise<void> {
     this.resetEngine();
     await this.ensureVaultSelection();
     if (!this.settings.vaultId) {
@@ -257,7 +288,8 @@ export default class SupaSyncPlugin extends Plugin {
       return;
     }
     await this.initializeSyncEngine();
-    await this.runSyncCycle();
+    if (forceSync || this.settings.autoSync) await this.runSyncCycle();
+    else this.lastStatus = "Ready";
   }
 
   private async ensureVaultSelection(): Promise<void> {
@@ -315,11 +347,19 @@ export default class SupaSyncPlugin extends Plugin {
   }
 
   private async runSyncCycle(): Promise<void> {
+    if (!this.cycleInFlight) {
+      this.cycleInFlight = this.performSyncCycle().finally(() => { this.cycleInFlight = undefined; });
+    }
+    return this.cycleInFlight;
+  }
+
+  private async performSyncCycle(): Promise<void> {
     if (!this.engine || this.paused) return;
     try {
       this.lastStatus = "Syncing";
       this.lastReport = await this.engine.cycle();
-      this.lastStatus = this.lastReport.errors.length ? "Error" : "OK";
+      this.lastStatus = this.lastReport.errors.length ? "Error" : "Up to date";
+      this.authMessage = this.lastReport.errors.join(" · ");
       if (this.lastReport.conflicts) {
         new Notice(`SupaSync preserved ${this.lastReport.conflicts} conflict cop${this.lastReport.conflicts === 1 ? "y" : "ies"}`);
       }
@@ -340,6 +380,10 @@ export default class SupaSyncPlugin extends Plugin {
       return false;
     }
     try {
+      const url = new URL(this.settings.supabaseUrl);
+      if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
+        throw new AuthError("Enter a valid Supabase project URL.");
+      }
       assertPublicApiKey(this.settings.anonKey);
     } catch (error) {
       this.lastStatus = "Needs setup";
@@ -350,7 +394,10 @@ export default class SupaSyncPlugin extends Plugin {
   }
 
   private getAuth(): PasswordAuth {
-    return new PasswordAuth(this.settings.supabaseUrl, this.settings.anonKey, createObsidianFetch(), {
+    if (!this.app.secretStorage) throw new AuthError("SupaSync requires Obsidian 1.11.4 or newer for secure session storage.");
+    const connection = `${this.settings.supabaseUrl}|${this.settings.anonKey}`;
+    if (this.auth && this.authConnection === connection) return this.auth;
+    this.auth = new PasswordAuth(this.settings.supabaseUrl, this.settings.anonKey, createObsidianFetch(), {
       get: async (id) => this.app.secretStorage.getSecret(id),
       set: async (id, value) => {
         this.app.secretStorage.setSecret(id, value);
@@ -358,7 +405,9 @@ export default class SupaSyncPlugin extends Plugin {
       delete: async (id) => {
         this.app.secretStorage.setSecret(id, "");
       },
-    });
+    }, `${sessionSecretId(this.settings.supabaseUrl)}-${this.settings.installationId}`);
+    this.authConnection = connection;
+    return this.auth;
   }
 
   private getClient(): SupaSyncClient {
@@ -378,6 +427,7 @@ export default class SupaSyncPlugin extends Plugin {
   }
 
   private resetEngine(): void {
+    this.engine?.pause();
     this.engine = undefined;
     this.boundStoreId = null;
   }
@@ -389,6 +439,12 @@ export default class SupaSyncPlugin extends Plugin {
   private fail(error: unknown, fallback: string): void {
     const message = error instanceof AuthError || error instanceof Error ? error.message : fallback;
     this.lastStatus = "Error";
+    this.authMessage = message;
+    if (error && typeof error === "object" && "code" in error && error.code === "AUTH_REQUIRED") {
+      this.signedInEmail = null;
+      this.resetEngine();
+      this.lastStatus = "Needs sign-in";
+    }
     this.lastReport.errors.push(message);
     new Notice(`SupaSync: ${message}`);
   }
