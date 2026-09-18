@@ -1,0 +1,12 @@
+{
+  "name": "@supasync/client",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@supasync/protocol": "0.1.0"
+  }
+}

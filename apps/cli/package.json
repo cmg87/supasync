@@ -1,0 +1,18 @@
+{
+  "name": "@supasync/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "supasync": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "esbuild src/cli.ts --bundle --platform=node --format=esm --outfile=dist/cli.js --banner:js='#!/usr/bin/env node' --external:fsevents",
+    "start": "node dist/cli.js"
+  },
+  "dependencies": {
+    "@supasync/client": "0.1.0",
+    "@supasync/protocol": "0.1.0",
+    "@supasync/sync-core": "0.1.0"
+  }
+}

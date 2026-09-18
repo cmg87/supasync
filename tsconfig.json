@@ -1,0 +1,15 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "include": [
+    "packages/*/src/**/*.ts",
+    "apps/*/src/**/*.ts",
+    "tests/**/*.ts"
+  ],
+  "exclude": [
+    "**/dist/**",
+    "apps/obsidian/main.js"
+  ]
+}

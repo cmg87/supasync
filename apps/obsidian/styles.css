@@ -1,0 +1,26 @@
+.supasync-status {
+  padding: 12px;
+  font-size: 14px;
+}
+
+.supasync-status h2,
+.supasync-conflicts h2,
+.supasync-history h2 {
+  margin-top: 0;
+}
+
+.supasync-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.supasync-error {
+  color: var(--text-error);
+}
+
+.supasync-ok {
+  color: var(--text-success);
+}

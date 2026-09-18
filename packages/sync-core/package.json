@@ -1,0 +1,13 @@
+{
+  "name": "@supasync/sync-core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@supasync/client": "0.1.0",
+    "@supasync/protocol": "0.1.0"
+  }
+}

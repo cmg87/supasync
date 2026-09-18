@@ -1,0 +1,34 @@
+node_modules/
+dist/
+build/
+.DS_Store
+*.log
+.env
+.env.*
+!.env.example
+coverage/
+.vitest/
+.turbo/
+*.tsbuildinfo
+
+# Supabase
+supabase/.temp
+supabase/.branches
+supabase/.env.keys
+supabase/.env.local
+
+# Local vaults / test fixtures
+.tmp/
+test-vaults/
+*.vault.bak
+
+# IDE
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+
+# Obsidian
+.obsidian/
+apps/obsidian/main.js
+apps/obsidian/main.js.map
