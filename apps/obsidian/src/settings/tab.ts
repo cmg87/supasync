@@ -15,21 +15,32 @@ export class SupaSyncSettingTab extends PluginSettingTab {
     containerEl.empty();
     containerEl.createEl("h2", { text: "SupaSync" });
 
-    containerEl.createEl("h3", { text: "Connection" });
-    new Setting(containerEl)
+    containerEl.createEl("p", {
+      text: this.plugin.signedInEmail
+        ? "Your account is connected. SupaSync keeps this vault in sync across your devices."
+        : "Sign in or create an account to connect this vault. SupaSync will set up your remote vault automatically.",
+    });
+    if (this.plugin.authMessage) {
+      const message = containerEl.createEl("p", { text: this.plugin.authMessage, cls: "supasync-message" });
+      message.setAttribute("role", "status");
+    }
+    const connection = containerEl.createEl("details");
+    connection.open = !this.plugin.settings.supabaseUrl || !this.plugin.settings.anonKey;
+    connection.createEl("summary", { text: "Supabase connection" });
+    new Setting(connection)
       .setName("Supabase URL")
       .setDesc("Your project URL. Example: https://abcd.supabase.co")
       .addText((text) =>
-        text.setValue(this.plugin.settings.supabaseUrl).onChange(async (value) => {
+        text.setDisabled(this.plugin.busy || Boolean(this.plugin.signedInEmail)).setValue(this.plugin.settings.supabaseUrl).onChange(async (value) => {
           this.plugin.settings.supabaseUrl = value.trim();
           await this.plugin.saveSettings();
         }),
       );
-    new Setting(containerEl)
+    new Setting(connection)
       .setName("Publishable / anon key")
       .setDesc("The public client key only. Never paste a secret or service-role key.")
       .addText((text) =>
-        text.setValue(this.plugin.settings.anonKey).onChange(async (value) => {
+        text.setDisabled(this.plugin.busy || Boolean(this.plugin.signedInEmail)).setValue(this.plugin.settings.anonKey).onChange(async (value) => {
           const trimmed = value.trim();
           if (looksLikeSecretKey(trimmed)) {
             new Notice("Service-role and secret keys are rejected.");
@@ -42,24 +53,29 @@ export class SupaSyncSettingTab extends PluginSettingTab {
       );
 
     containerEl.createEl("h3", { text: "Account" });
-    new Setting(containerEl)
-      .setName("Email")
-      .addText((text) =>
-        text.setValue(this.plugin.settings.email).onChange(async (value) => {
-          this.plugin.settings.email = value.trim();
-          await this.plugin.saveSettings();
-        }),
-      );
-    new Setting(containerEl)
-      .setName("Password")
-      .setDesc("Used only to create an account or sign in. It is never saved in plugin settings.")
-      .addText((text) => {
-        text.inputEl.type = "password";
-        text.setValue(this.plugin.pendingPassword);
-        text.onChange((value) => {
-          this.plugin.pendingPassword = value;
+    if (!this.plugin.signedInEmail) {
+      new Setting(containerEl)
+        .setName("Email")
+        .addText((text) =>
+          text.setDisabled(this.plugin.busy).setValue(this.plugin.settings.email).onChange(async (value) => {
+            this.plugin.settings.email = value.trim();
+            await this.plugin.saveSettings();
+          }),
+        );
+      new Setting(containerEl)
+        .setName("Password")
+        .setDesc("Used only to create an account or sign in. It is never saved in plugin settings.")
+        .addText((text) => {
+          text.setDisabled(this.plugin.busy);
+          text.inputEl.type = "password";
+          text.inputEl.autocomplete = "current-password";
+          text.setValue(this.plugin.pendingPassword);
+          text.onChange((value) => {
+            this.plugin.pendingPassword = value;
+          });
         });
-      });
+
+    }
 
     const sessionEmail = this.plugin.signedInEmail;
     if (sessionEmail) {
@@ -67,25 +83,25 @@ export class SupaSyncSettingTab extends PluginSettingTab {
         .setName("Signed in")
         .setDesc(sessionEmail)
         .addButton((btn) =>
-          btn.setButtonText("Sign out").onClick(() => this.run(() => this.plugin.signOut())),
+          btn.setButtonText("Sign out").setDisabled(this.plugin.busy).onClick(() => this.run(() => this.plugin.signOut())),
         );
     } else {
       new Setting(containerEl)
         .setName("Sign in or create an account")
         .setDesc("Use the same email on every device that should share notes.")
         .addButton((btn) =>
-          btn.setButtonText("Create account").setDisabled(this.plugin.busy).onClick(() => this.run(() => this.plugin.createAccount())),
+          btn.setButtonText(this.plugin.busy ? "Please wait…" : "Create account").setDisabled(this.plugin.busy).onClick(() => this.run(() => this.plugin.createAccount())),
         )
         .addButton((btn) =>
-          btn.setButtonText("Sign in").setCta().setDisabled(this.plugin.busy).onClick(() => this.run(() => this.plugin.signIn())),
+          btn.setButtonText(this.plugin.busy ? "Please wait…" : "Sign in").setCta().setDisabled(this.plugin.busy).onClick(() => this.run(() => this.plugin.signIn())),
         );
     }
 
+    if (!sessionEmail) return;
+
     containerEl.createEl("h3", { text: "Remote vault" });
     const vaults = this.plugin.remoteVaults;
-    if (!sessionEmail) {
-      new Setting(containerEl).setName("Remote vault").setDesc("Sign in to see or create your synced vault.");
-    } else if (vaults.length <= 1) {
+    if (vaults.length <= 1) {
       const name = vaults[0]?.name ?? this.plugin.app.vault.getName();
       new Setting(containerEl)
         .setName("Remote vault")
@@ -165,6 +181,7 @@ export class SupaSyncSettingTab extends PluginSettingTab {
   private async run(work: () => Promise<unknown>): Promise<void> {
     if (this.plugin.busy) return;
     this.plugin.busy = true;
+    this.plugin.authMessage = "";
     this.display();
     try {
       await work();

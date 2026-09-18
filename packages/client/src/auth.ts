@@ -22,6 +22,8 @@ export { AuthError } from "./keys.ts";
 
 export class PasswordAuth {
   private readonly secretId: string;
+  private refreshing?: Promise<string | null>;
+  private signingOut = false;
 
   constructor(
     private readonly url: string,
@@ -71,11 +73,29 @@ export class PasswordAuth {
   }
 
   async signOut(): Promise<void> {
-    if (this.secrets.delete) {
-      await this.secrets.delete(this.secretId);
-      return;
+    this.signingOut = true;
+    try {
+      // Finish token rotation before revoking the current session.
+      await this.refreshing?.catch(() => null);
+      const session = await this.getSession();
+      if (session) {
+        const res = await this.fetchImpl(`${this.authUrl()}/logout?scope=local`, {
+          method: "POST",
+          headers: { ...this.publicHeaders(), Authorization: `Bearer ${session.accessToken}` },
+        });
+        if (!res.ok && res.status !== 401 && res.status !== 403 && res.status !== 404) {
+          throw new AuthError("Signed out locally. Server session revocation could not be confirmed.", res.status);
+        }
+      }
+    } finally {
+      await this.clearSession();
+      this.signingOut = false;
     }
-    await this.secrets.set(this.secretId, "");
+  }
+
+  private async clearSession(): Promise<void> {
+    if (this.secrets.delete) await this.secrets.delete(this.secretId);
+    else await this.secrets.set(this.secretId, "");
   }
 
   async getSession(): Promise<StoredSession | null> {
@@ -83,7 +103,10 @@ export class PasswordAuth {
     if (!raw) return null;
     try {
       const session = JSON.parse(raw) as StoredSession;
-      if (!session.accessToken || !session.refreshToken) return null;
+      if (typeof session?.accessToken !== "string" || !session.accessToken ||
+          typeof session.refreshToken !== "string" || !session.refreshToken ||
+          typeof session.expiresAt !== "number" || !Number.isFinite(session.expiresAt) ||
+          typeof session.userId !== "string" || typeof session.email !== "string") return null;
       return session;
     } catch {
       return null;
@@ -91,10 +114,14 @@ export class PasswordAuth {
   }
 
   async getAccessToken(): Promise<string | null> {
+    if (this.signingOut) return null;
     const session = await this.getSession();
-    if (!session) return null;
+    if (!session || this.signingOut) return null;
     if (Date.now() < session.expiresAt - 30_000) return session.accessToken;
-    return this.refresh(session);
+    if (!this.refreshing) {
+      this.refreshing = this.refresh(session).finally(() => { this.refreshing = undefined; });
+    }
+    return this.refreshing;
   }
 
   private async refresh(session: StoredSession): Promise<string | null> {
@@ -103,7 +130,13 @@ export class PasswordAuth {
       headers: this.publicHeaders(),
       body: JSON.stringify({ refresh_token: session.refreshToken }),
     });
-    if (!res.ok) return null;
+    if (!res.ok) {
+      if (res.status === 400 || res.status === 401 || res.status === 403) {
+        await this.clearSession();
+        return null;
+      }
+      throw new AuthError("Could not refresh your session. Check the connection and try again.", res.status);
+    }
     const body = await readJson(res);
     const next = sessionFromAuthBody(body, session.email);
     if (!next) return null;
@@ -131,7 +164,6 @@ export class PasswordAuth {
   private publicHeaders(): Record<string, string> {
     return {
       apikey: this.anonKey,
-      Authorization: `Bearer ${this.anonKey}`,
       "Content-Type": "application/json",
     };
   }
@@ -155,6 +187,7 @@ function sessionFromAuthBody(body: unknown, fallbackEmail: string): StoredSessio
 }
 
 function expiryFromAuthBody(body: Record<string, unknown>): number {
+  if (typeof body.expires_at === "number" && Number.isFinite(body.expires_at)) return body.expires_at * 1000;
   const expiresIn = typeof body.expires_in === "number" ? body.expires_in : 3600;
   return Date.now() + expiresIn * 1000;
 }

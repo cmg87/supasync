@@ -73,7 +73,7 @@ describe("PasswordAuth", () => {
     );
     await auth.signUp("new@example.com", "hunter2");
     expect(captured?.get("apikey")).toBe(anon);
-    expect(captured?.get("Authorization")).toBe(`Bearer ${anon}`);
+    expect(captured?.get("Authorization")).toBeNull();
     expect(JSON.stringify({
       apikey: captured?.get("apikey"),
       authorization: captured?.get("Authorization"),
@@ -148,5 +148,82 @@ describe("PasswordAuth", () => {
 
   it("rejects service-role keys", () => {
     expect(() => new PasswordAuth(url, "sb_secret_abc", fetch, new MemorySecrets())).toThrow(/secret|service-role/i);
+  });
+});
+
+describe("session lifecycle", () => {
+  const body = (expiresIn = 0) => ({ access_token: "access", refresh_token: "refresh", expires_in: expiresIn, user: { id: "u", email: "a@b.c" } });
+
+  it("shares one refresh across concurrent requests", async () => {
+    let refreshes = 0;
+    const auth = new PasswordAuth(url, anon, async (input) => {
+      if (String(input).includes("refresh_token")) {
+        refreshes++;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        return jsonResponse({ ...body(3600), access_token: "rotated" });
+      }
+      return jsonResponse(body());
+    }, new MemorySecrets());
+    await auth.signIn("a@b.c", "password");
+    expect(await Promise.all(Array.from({ length: 8 }, () => auth.getAccessToken()))).toEqual(Array(8).fill("rotated"));
+    expect(refreshes).toBe(1);
+  });
+
+  it("clears rejected refresh tokens but retains sessions on a temporary outage", async () => {
+    let status = 503;
+    const auth = new PasswordAuth(url, anon, async (input) => String(input).includes("refresh_token")
+      ? jsonResponse({}, status) : jsonResponse(body()), new MemorySecrets());
+    await auth.signIn("a@b.c", "password");
+    await expect(auth.getAccessToken()).rejects.toThrow("Check the connection");
+    expect(await auth.getSession()).not.toBeNull();
+    status = 400;
+    expect(await auth.getAccessToken()).toBeNull();
+    expect(await auth.getSession()).toBeNull();
+  });
+
+  it("revokes only the current session and clears secrets even if offline", async () => {
+    const auth = new PasswordAuth(url, anon, async (input, init) => {
+      if (String(input).includes("logout")) {
+        expect(String(input)).toContain("scope=local");
+        expect(new Headers(init?.headers).get("Authorization")).toBe("Bearer access");
+        throw new Error("offline");
+      }
+      return jsonResponse(body(3600));
+    }, new MemorySecrets());
+    await auth.signIn("a@b.c", "password");
+    await expect(auth.signOut()).rejects.toThrow("offline");
+    expect(await auth.getSession()).toBeNull();
+  });
+
+  it("does not restore a session when sign-out overlaps refresh", async () => {
+    let finish!: () => void;
+    let started!: () => void;
+    const refreshing = new Promise<void>((resolve) => { started = resolve; });
+    const auth = new PasswordAuth(url, anon, async (input) => {
+      if (String(input).includes("refresh_token")) {
+        started();
+        await new Promise<void>((resolve) => { finish = resolve; });
+        return jsonResponse(body(3600));
+      }
+      if (String(input).includes("logout")) return new Response(null, { status: 204 });
+      return jsonResponse(body());
+    }, new MemorySecrets());
+    await auth.signIn("a@b.c", "password");
+    const refresh = auth.getAccessToken();
+    await refreshing;
+    const logout = auth.signOut();
+    expect(await auth.getAccessToken()).toBeNull();
+    finish();
+    await Promise.all([refresh, logout]);
+    expect(await auth.getSession()).toBeNull();
+  });
+
+  it("rejects corrupt persisted sessions", async () => {
+    const secrets = new MemorySecrets();
+    const auth = new PasswordAuth(url, anon, fetch, secrets, "test");
+    for (const value of ["null", "{}", '{"accessToken":"a","refreshToken":"r"}', '"bad"']) {
+      await secrets.set("test", value);
+      expect(await auth.getSession()).toBeNull();
+    }
   });
 });

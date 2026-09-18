@@ -18,7 +18,8 @@
     "test:integration": "vitest run tests/integration tests/faults",
     "dev:backend": "node scripts/dev-backend.mjs",
     "seed": "node scripts/seed.mjs",
-    "release": "node scripts/release.mjs"
+    "release": "node scripts/release.mjs",
+    "dev:plugin": "npm run build -w @supasync/obsidian && node scripts/install-test-vault.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.15.17",

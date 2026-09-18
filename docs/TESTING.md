@@ -60,3 +60,17 @@ Schema/protocol: Postgres `supasync` schema, protocol version `1`, path canon `p
 
 
 Record separately against 10,000 small Markdown files: hardware, cold bootstrap time, one-note sync, idle request rate, peak memory. No bandwidth claim is made without those measurements.
+
+## Local onboarding follow-up — 2026-09-18
+
+- `npm test`: **63 passed, 1 skipped** (the existing optional RPC test).
+- `supabase test db --local`: **12 passed**.
+- `supabase db lint --local --schema supasync --level error --fail-on error`: no errors.
+- `npm run typecheck` and `npm run build`: passed.
+- `npm run dev:plugin`: verified creation of a new, preconfigured disposable vault.
+- The real plugin account methods and Obsidian HTTP adapter were exercised against local Auth and Edge Functions: signup, wrong password, sign-in, automatic vault selection, first Markdown upload, a second installation downloading it, session restoration/refresh, manual sync with auto-sync disabled, and sign-out isolation.
+- Host APIs, SecretStorage, IndexedDB and vault files in that integration test use memory substitutes. This is **not** a claim of real Obsidian desktop UI verification; desktop/mobile UI remains unverified.
+
+The full plugin test found and now guards against a snapshot bootstrap failure (`max(uuid)` is unsupported by Postgres). Migration `20260918200421_fix_snapshot_uuid_cursor.sql` replaces it with a UUID-ordered cursor and is applied to the project-local database. No production project or personal vault was used.
+
+To reproduce the UI check, keep `npm run dev:backend` running, run `npm run dev:plugin`, open the printed folder in Obsidian 1.11.4+, enable community plugins, and open Settings → SupaSync. Create an account and expect **Up to date**. Make a second disposable vault using the same command, sign in to the same account, and verify that edits to a Markdown note arrive in both directions. Restart Obsidian and verify the account remains connected; sign out in one vault and confirm the other still syncs.

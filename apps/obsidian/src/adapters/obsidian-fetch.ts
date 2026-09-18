@@ -22,7 +22,7 @@ export function createObsidianFetch(): typeof fetch {
     else if (init?.body instanceof Blob) body = await init.body.arrayBuffer();
     const param: RequestUrlParam = { url, method, headers, body, throw: false };
     const res = await requestUrl(param);
-    return new Response(res.arrayBuffer, {
+    return new Response([204, 205, 304].includes(res.status) ? null : res.arrayBuffer, {
       status: res.status,
       headers: res.headers,
     });

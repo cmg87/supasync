@@ -27,7 +27,7 @@ In plugin settings:
 
 You do not open Supabase Studio, write SQL, use the CLI, or paste a vault UUID to start syncing. The remote vault id is stored internally and shown only under Advanced.
 
-The password is used for that one sign-in or signup and is not saved in plugin settings. Session tokens are stored in Obsidian SecretStorage, scoped to the Supabase project.
+The password is used for that one sign-in or signup and is not saved in plugin settings. Session tokens are stored in Obsidian SecretStorage, scoped to the Supabase project and plugin installation. Signing out revokes only that installation’s session. Existing installations using the earlier shared session key need to sign in once after updating.
 
 ## Development
 
@@ -41,6 +41,18 @@ npm run dev:backend
 ```
 
 `npm run dev:backend` starts the local Supabase stack **and** serves the Edge Functions the plugin calls. Hosted Supabase deploys those functions separately; production does not use this command.
+
+### Local plugin quick start
+
+With `npm run dev:backend` running in one terminal, run this in another:
+
+```bash
+npm run dev:plugin
+```
+
+This builds the plugin and creates a **new disposable vault** under `test-vaults/`, with the local URL and public key already configured. Open the printed folder as a vault in Obsidian 1.11.4+, enable community plugins if prompted, and open **Settings → SupaSync**. Create an account or sign in. Local sign-up confirms immediately; SupaSync creates/selects the remote vault and starts syncing.
+
+Run the command again for a second disposable vault and sign in with the same account to test sync. The installer never opens or modifies a personal vault. Keep the backend terminal running. Auth failures remain visible in settings; passwords are cleared after each attempt. The connection settings are under **Supabase connection**.
 
 Never put a service-role key in plugin settings.
 
