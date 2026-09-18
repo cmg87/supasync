@@ -29,8 +29,6 @@ export function canonicalizePath(input: string): { display: string; pathKey: str
   return { display, pathKey: components.map(fold).join("/") };
 }
 
-export { PATH_CANON_VERSION };
-
 export function canonicalJson(value: unknown): string {
   return JSON.stringify(sortValue(value));
 }

@@ -10,15 +10,16 @@ supabase functions deploy supasync-maintenance
 ```
 
 4. Set backend secrets (`R2_*` only if using R2). Never ship those secrets in the plugin.
-5. Create an Auth user (email/password is the v1 mobile-friendly path).
-6. Install plugin assets into `.obsidian/plugins/supasync/`.
-7. Sign in, create or select a vault, run the diagnostic round-trip.
+5. Install plugin assets into `.obsidian/plugins/supasync/`.
+6. In the plugin, enter the project URL and publishable/anon key, then **Create account** or **Sign in**. The plugin creates or selects the remote vault by name. Do not create Auth users in Studio, and do not paste vault UUIDs.
+7. Run **Sync now** once if you want an immediate round-trip.
 
-Local:
+The CLI remains available for Hermes/headless use (`signup`, `login`, `vaults`, `create-vault`, `sync`). It is not required to onboard a normal Obsidian user.
+
+## Local backend
 
 ```bash
-supabase start
-supabase functions serve
+npm run dev:backend
 ```
 
-The local API URL is `http://127.0.0.1:54321`. Configure mobile devices with a LAN or tunnel hostname, not `localhost`.
+That starts the local Supabase stack and `supabase functions serve`. The plugin talks to `http://127.0.0.1:54321` with the local publishable/anon key printed by `supabase start`. Configure mobile devices with a LAN or tunnel hostname, not `localhost`.

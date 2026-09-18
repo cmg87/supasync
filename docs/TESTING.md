@@ -8,9 +8,13 @@ npm run dev:backend
 supabase test db
 ```
 
+`npm run dev:backend` is required for plugin-path integration tests: it starts Postgres **and** the `supasync-api` Edge Function. Direct RPC tests can run after `supabase start` alone.
+
 Required families are listed in the architecture plan: CRUD, multi-device, conflicts, delivery failures, durability, journal/snapshot, blob integrity, namespace, authorization, recovery/migration, cleanup, and device UX.
 
 Property tests cover path canon and merge. Three in-memory clients must converge or preserve an explicit conflict copy.
+
+Integration tests create local Auth users and vaults named `supasync-fixture-*`. There is no production “delete any vault” endpoint. Those fixtures belong to their own Auth users, so `listVaults()` for a real account does not show them.
 
 ## Platforms
 
@@ -30,25 +34,27 @@ A phone's `localhost` is not the desktop. Signed URLs must use a hostname the ph
 Commands:
 
 ```bash
-npm install
-npx vitest run          # 39 passed, 1 skipped
+npx vitest run          # 56 passed, 1 skipped
 npx tsc --pretty false
 npm run build
-node scripts/release.mjs
-supabase start          # project_id=supasync, isolated local stack
-docker exec … psql … authorization_test.sql   # 12/12 pgTAP
+supabase start          # already running, project_id=supasync
+supabase functions serve  # already running; canon.ts duplicate export fixed so workers boot
+supabase test db        # 12/12 pgTAP
 ```
 
 | Target | Result |
 |---|---|
-| Node unit/property/sync-core | 38 passed |
+| Node unit/property/sync-core | passed |
+| Password signup/signin/refresh/sign-out and API header regression | passed |
+| Vault onboarding decisions and IndexedDB store isolation | passed |
 | Two Auth users, vault isolation, stale write, idempotent commit | passed against local Supabase |
+| Edge Function path: Auth → JWT → list_vaults → create_vault → register_client | passed |
 | pgTAP grants/RLS | 12 passed |
-| Plugin bundle `dist/obsidian/{main.js,manifest.json,styles.css,versions.json}` | built; no Node `fs`/`path`/`crypto`/`child_process` requires |
+| Plugin bundle `apps/obsidian/{main.js,manifest.json,styles.css,versions.json}` | built; no Node `fs`/`path`/`crypto`/`child_process` requires |
 | CLI `apps/cli/dist/cli.js` | built |
+| Real Obsidian desktop onboarding | unverified in this environment |
 | Real Android / iOS install | unverified |
 | Real Cloudflare R2 | unverified (adapter present; needs `R2_*` secrets) |
-| Real Obsidian desktop two-vault run | unverified in this environment |
 
 Schema/protocol: Postgres `supasync` schema, protocol version `1`, path canon `pathcanon-1`. Attachment limit 25 MiB. Cursors are decimal strings.
 

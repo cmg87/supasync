@@ -1,3 +1,8 @@
+/**
+ * Direct RPC tests. They create local fixture Auth users and vaults whose
+ * names start with `supasync-fixture-`. The plugin never lists those rows
+ * unless the signed-in actor owns them.
+ */
 import { describe, expect, it } from "vitest";
 
 const url = process.env.SUPABASE_URL ?? "http://127.0.0.1:54321";
@@ -45,9 +50,9 @@ async function rpc(actorId: string, op: string, request: unknown, key = service)
 
 describe("two-user authorization against local supabase", () => {
   it("isolates vaults and rejects stale writes", async () => {
-    const owner = await signup(`owner-${Date.now()}@example.com`, "test-password-1");
-    const other = await signup(`other-${Date.now()}@example.com`, "test-password-2");
-    const created = await rpc(owner.id, "create_vault", { name: "Alpha" });
+    const owner = await signup(`supasync-fixture-owner-${Date.now()}@example.test`, "test-password-1");
+    const other = await signup(`supasync-fixture-other-${Date.now()}@example.test`, "test-password-2");
+    const created = await rpc(owner.id, "create_vault", { name: `supasync-fixture-Alpha-${Date.now()}` });
     expect(created.status).toBe(200);
     expect(created.body.ok).toBe(true);
     const vaultId = created.body.data.vault.id as string;

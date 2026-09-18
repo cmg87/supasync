@@ -10,7 +10,10 @@ Do not UPDATE Postgres tables directly. That skips receipts and history. Call th
 Credentials live outside the vault, typically `~/.config/supasync/`. Never write the service-role key into a note.
 
 ```bash
+node /path/to/supasync/apps/cli/dist/cli.js signup --email you@example.com --password '…'
+node /path/to/supasync/apps/cli/dist/cli.js login --email you@example.com --password '…'
 node /path/to/supasync/apps/cli/dist/cli.js vaults
+node /path/to/supasync/apps/cli/dist/cli.js create-vault --name Notes
 node /path/to/supasync/apps/cli/dist/cli.js sync --dir /path/to/vault --vault <vault-id>
 ```
 

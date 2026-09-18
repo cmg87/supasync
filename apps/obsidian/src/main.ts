@@ -1,11 +1,21 @@
 import { Notice, Plugin, TFile } from "obsidian";
-import { PasswordAuth, SupaSyncClient } from "@supasync/client";
+import {
+  AuthError,
+  PasswordAuth,
+  SupaSyncClient,
+  assertPublicApiKey,
+  decideVaultSelection,
+  looksLikeSecretKey,
+  type StoredSession,
+  type VaultInfo,
+} from "@supasync/client";
 import { DEFAULT_LIMITS, PLUGIN_ID } from "@supasync/protocol";
 import { SyncEngine, type SyncReport } from "@supasync/sync-core";
 import { createObsidianFetch } from "./adapters/obsidian-fetch.ts";
 import { IndexedDbStore } from "./adapters/indexeddb-store.ts";
 import { ObsidianVaultAdapter } from "./adapters/obsidian-vault.ts";
 import { SupaSyncSettingTab } from "./settings/tab.ts";
+import { newInstallationId, syncStoreId } from "./sync-state.ts";
 import { CONFLICT_VIEW, ConflictView, HISTORY_VIEW, HistoryView, STATUS_VIEW, StatusView } from "./ui/views.ts";
 
 export interface SupaSyncSettings {
@@ -15,6 +25,7 @@ export interface SupaSyncSettings {
   vaultId: string;
   deviceLabel: string;
   autoSync: boolean;
+  installationId: string;
 }
 
 const DEFAULT_SETTINGS: SupaSyncSettings = {
@@ -24,17 +35,23 @@ const DEFAULT_SETTINGS: SupaSyncSettings = {
   vaultId: "",
   deviceLabel: "obsidian",
   autoSync: true,
+  installationId: "",
 };
 
 export default class SupaSyncPlugin extends Plugin {
   override settings: SupaSyncSettings = DEFAULT_SETTINGS;
   pendingPassword = "";
+  pendingVaultName = "";
+  busy = false;
+  remoteVaults: VaultInfo[] = [];
+  signedInEmail: string | null = null;
   private engine?: SyncEngine;
   private paused = false;
   private lastReport: SyncReport = { pulled: 0, pushed: 0, conflicts: 0, applied: 0, errors: [] };
-  private lastStatus = "idle";
+  private lastStatus = "Needs setup";
   private debounceTimer?: number;
-  private pollTimer?: number;
+  private boundStoreId: string | null = null;
+  private booting = false;
 
   override async onload(): Promise<void> {
     await this.loadSettings();
@@ -96,65 +113,187 @@ export default class SupaSyncPlugin extends Plugin {
 
   override onunload(): void {
     window.clearTimeout(this.debounceTimer);
-    window.clearInterval(this.pollTimer);
   }
 
   async loadSettings(): Promise<void> {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    delete (this.settings as { password?: string }).password;
+    this.pendingPassword = "";
+    if (!this.settings.installationId) {
+      this.settings.installationId = newInstallationId();
+      await this.saveSettings();
+    }
   }
 
   async saveSettings(): Promise<void> {
-    await this.saveData(this.settings);
+    const { supabaseUrl, anonKey, email, vaultId, deviceLabel, autoSync, installationId } = this.settings;
+    await this.saveData({ supabaseUrl, anonKey, email, vaultId, deviceLabel, autoSync, installationId });
+  }
+
+  async createAccount(): Promise<void> {
+    if (!this.ensureConnection()) return;
+    if (!this.settings.email || !this.pendingPassword) {
+      new Notice("Enter an email and password.");
+      return;
+    }
+    try {
+      const result = await this.getAuth().signUp(this.settings.email, this.pendingPassword);
+      this.pendingPassword = "";
+      if (result.status === "confirmation_required") {
+        this.signedInEmail = null;
+        this.lastStatus = "Confirm email";
+        new Notice("Check your email to confirm the account, then sign in.");
+        return;
+      }
+      this.signedInEmail = result.session.email;
+      new Notice("Account created");
+      await this.afterAuthentication();
+    } catch (error) {
+      this.fail(error, "Could not create the account");
+    }
   }
 
   async signIn(): Promise<void> {
-    if (this.settings.anonKey.includes("service_role")) {
-      new Notice("Service-role keys are not allowed in the plugin.");
+    if (!this.ensureConnection()) return;
+    if (!this.settings.email || !this.pendingPassword) {
+      new Notice("Enter an email and password.");
       return;
     }
-    const auth = this.auth();
-    await auth.signIn(this.settings.email, this.pendingPassword);
-    this.pendingPassword = "";
-    new Notice("Signed in to SupaSync");
-    await this.boot();
+    try {
+      const session = await this.getAuth().signIn(this.settings.email, this.pendingPassword);
+      this.pendingPassword = "";
+      this.signedInEmail = session.email;
+      new Notice("Signed in to SupaSync");
+      await this.afterAuthentication();
+    } catch (error) {
+      this.fail(error, "Could not sign in");
+    }
   }
 
   async signOut(): Promise<void> {
-    await this.auth().signOut();
-    this.engine = undefined;
-    this.lastStatus = "signed out";
+    await this.getAuth().signOut();
+    this.resetEngine();
+    this.signedInEmail = null;
+    this.remoteVaults = [];
+    this.lastStatus = "Signed out";
     new Notice("SupaSync signed out. Local files were not deleted.");
   }
 
-  async syncNow(): Promise<void> {
-    if (!this.engine) await this.boot();
-    if (!this.engine || this.paused) return;
-    try {
-      this.lastStatus = "syncing";
-      this.lastReport = await this.engine.cycle();
-      this.lastStatus = this.lastReport.errors.length ? "error" : "ok";
-      if (this.lastReport.conflicts) new Notice(`SupaSync preserved ${this.lastReport.conflicts} conflict cop${this.lastReport.conflicts === 1 ? "y" : "ies"}`);
-    } catch (error) {
-      this.lastStatus = "error";
-      this.lastReport.errors.push(error instanceof Error ? error.message : String(error));
-      new Notice(`SupaSync: ${this.lastReport.errors.at(-1)}`);
+  async refreshVaults(): Promise<VaultInfo[]> {
+    const client = this.getClient();
+    const { vaults } = await client.listVaults();
+    this.remoteVaults = vaults;
+    if (this.settings.vaultId && !vaults.some((vault) => vault.id === this.settings.vaultId)) {
+      this.settings.vaultId = "";
+      await this.saveSettings();
     }
+    return vaults;
+  }
+
+  async createRemoteVault(name?: string): Promise<void> {
+    const client = this.getClient();
+    const vaultName = (name ?? this.pendingVaultName).trim() || this.app.vault.getName();
+    const { vault } = await client.createVault(vaultName);
+    this.pendingVaultName = "";
+    await this.selectRemoteVault(vault.id);
+    new Notice(`Created remote vault “${vault.name}”`);
+  }
+
+  async selectRemoteVault(vaultId: string): Promise<void> {
+    this.settings.vaultId = vaultId;
+    await this.saveSettings();
+    await this.refreshVaults();
+    await this.initializeSyncEngine();
+    await this.runSyncCycle();
+  }
+
+  async syncNow(): Promise<void> {
+    if (!this.engine) {
+      await this.boot();
+      return;
+    }
+    if (this.paused) return;
+    await this.runSyncCycle();
+  }
+
+  statusLabel(): string {
+    return this.lastStatus;
+  }
+
+  statusSummary(): string {
+    const vault = this.remoteVaults.find((item) => item.id === this.settings.vaultId);
+    const parts = [
+      this.signedInEmail ? `Signed in as ${this.signedInEmail}` : "Not signed in",
+      vault ? `Vault: ${vault.name}` : this.settings.vaultId ? "Vault selected" : "No vault selected",
+      this.paused ? "Paused" : "",
+    ];
+    return parts.filter(Boolean).join(" · ");
   }
 
   private async boot(): Promise<void> {
-    if (!this.settings.supabaseUrl || !this.settings.anonKey || !this.settings.vaultId) {
-      this.lastStatus = "needs setup";
+    if (this.booting) return;
+    this.booting = true;
+    try {
+      if (!this.ensureConnection(false)) return;
+      const session = await this.readSession();
+      if (!session) {
+        this.lastStatus = "Needs sign-in";
+        return;
+      }
+      this.signedInEmail = session.email;
+      await this.afterAuthentication();
+    } catch (error) {
+      this.fail(error, "Could not start SupaSync");
+    } finally {
+      this.booting = false;
+    }
+  }
+
+  private async afterAuthentication(): Promise<void> {
+    this.resetEngine();
+    await this.ensureVaultSelection();
+    if (!this.settings.vaultId) {
+      this.lastStatus = "Select vault";
       return;
     }
-    const fetchImpl = createObsidianFetch();
-    const auth = this.auth(fetchImpl);
-    const token = await auth.getAccessToken();
-    if (!token) {
-      this.lastStatus = "needs sign-in";
+    await this.initializeSyncEngine();
+    await this.runSyncCycle();
+  }
+
+  private async ensureVaultSelection(): Promise<void> {
+    const vaults = await this.refreshVaults();
+    const decision = decideVaultSelection(vaults, this.settings.vaultId, this.app.vault.getName());
+    if (decision.type === "prompt") {
+      if (this.settings.vaultId) {
+        this.settings.vaultId = "";
+        await this.saveSettings();
+      }
+      this.resetEngine();
+      this.lastStatus = "Select vault";
       return;
     }
-    const client = new SupaSyncClient({ url: this.settings.supabaseUrl, fetch: fetchImpl, session: auth });
-    const store = new IndexedDbStore(`${PLUGIN_ID}:${this.app.vault.getName()}`);
+    if (decision.type === "create") {
+      const { vault } = await this.getClient().createVault(decision.name);
+      this.settings.vaultId = vault.id;
+      await this.saveSettings();
+      await this.refreshVaults();
+      return;
+    }
+    this.settings.vaultId = decision.vault.id;
+    await this.saveSettings();
+  }
+
+  private async initializeSyncEngine(): Promise<void> {
+    if (!this.settings.vaultId) return;
+    const storeId = syncStoreId({
+      installationId: this.settings.installationId,
+      backendUrl: this.settings.supabaseUrl,
+      vaultId: this.settings.vaultId,
+    });
+    if (this.engine && this.boundStoreId === storeId) return;
+    this.resetEngine();
+    const client = this.getClient();
+    const store = new IndexedDbStore(storeId);
     const meta = await store.getMeta();
     meta.label = this.settings.deviceLabel || "obsidian";
     meta.platform = "obsidian";
@@ -172,16 +311,86 @@ export default class SupaSyncPlugin extends Plugin {
       store,
       vaultId: this.settings.vaultId,
     });
-    await this.syncNow();
+    this.boundStoreId = storeId;
   }
 
-  private auth(fetchImpl = createObsidianFetch()): PasswordAuth {
-    return new PasswordAuth(this.settings.supabaseUrl, this.settings.anonKey, fetchImpl, {
+  private async runSyncCycle(): Promise<void> {
+    if (!this.engine || this.paused) return;
+    try {
+      this.lastStatus = "Syncing";
+      this.lastReport = await this.engine.cycle();
+      this.lastStatus = this.lastReport.errors.length ? "Error" : "OK";
+      if (this.lastReport.conflicts) {
+        new Notice(`SupaSync preserved ${this.lastReport.conflicts} conflict cop${this.lastReport.conflicts === 1 ? "y" : "ies"}`);
+      }
+    } catch (error) {
+      this.fail(error, "Sync failed");
+    }
+  }
+
+  private ensureConnection(notice = true): boolean {
+    if (!this.settings.supabaseUrl || !this.settings.anonKey) {
+      this.lastStatus = "Needs setup";
+      if (notice) new Notice("Enter the Supabase URL and publishable key first.");
+      return false;
+    }
+    if (looksLikeSecretKey(this.settings.anonKey)) {
+      this.lastStatus = "Needs setup";
+      if (notice) new Notice("Service-role and secret keys are not allowed.");
+      return false;
+    }
+    try {
+      assertPublicApiKey(this.settings.anonKey);
+    } catch (error) {
+      this.lastStatus = "Needs setup";
+      if (notice) new Notice(error instanceof Error ? error.message : "Invalid API key");
+      return false;
+    }
+    return true;
+  }
+
+  private getAuth(): PasswordAuth {
+    return new PasswordAuth(this.settings.supabaseUrl, this.settings.anonKey, createObsidianFetch(), {
       get: async (id) => this.app.secretStorage.getSecret(id),
       set: async (id, value) => {
         this.app.secretStorage.setSecret(id, value);
       },
+      delete: async (id) => {
+        this.app.secretStorage.setSecret(id, "");
+      },
     });
+  }
+
+  private getClient(): SupaSyncClient {
+    return new SupaSyncClient({
+      url: this.settings.supabaseUrl,
+      anonKey: this.settings.anonKey,
+      fetch: createObsidianFetch(),
+      session: this.getAuth(),
+    });
+  }
+
+  private async readSession(): Promise<StoredSession | null> {
+    const auth = this.getAuth();
+    const token = await auth.getAccessToken();
+    if (!token) return null;
+    return auth.getSession();
+  }
+
+  private resetEngine(): void {
+    this.engine = undefined;
+    this.boundStoreId = null;
+  }
+
+  reportError(error: unknown, fallback: string): void {
+    this.fail(error, fallback);
+  }
+
+  private fail(error: unknown, fallback: string): void {
+    const message = error instanceof AuthError || error instanceof Error ? error.message : fallback;
+    this.lastStatus = "Error";
+    this.lastReport.errors.push(message);
+    new Notice(`SupaSync: ${message}`);
   }
 
   private onVaultEvent(path: string, _old?: string): void {
@@ -192,11 +401,20 @@ export default class SupaSyncPlugin extends Plugin {
   }
 
   private async rebuild(): Promise<void> {
-    const store = new IndexedDbStore(`${PLUGIN_ID}:${this.app.vault.getName()}`);
+    if (!this.settings.vaultId) {
+      new Notice("Select a remote vault first.");
+      return;
+    }
+    const store = new IndexedDbStore(syncStoreId({
+      installationId: this.settings.installationId,
+      backendUrl: this.settings.supabaseUrl,
+      vaultId: this.settings.vaultId,
+    }));
     const meta = await store.getMeta();
     meta.receivedCursor = "0";
     meta.appliedCursor = "0";
     await store.putMeta(meta);
+    this.resetEngine();
     new Notice("Local index marked for rebuild. Syncing…");
     await this.syncNow();
   }
@@ -208,6 +426,7 @@ export default class SupaSyncPlugin extends Plugin {
         report: this.lastReport,
         vaultId: this.settings.vaultId ? "set" : "missing",
         urlHost: this.settings.supabaseUrl,
+        plugin: PLUGIN_ID,
       },
       null,
       2,
@@ -219,7 +438,7 @@ export default class SupaSyncPlugin extends Plugin {
   }
 
   private statusText(): string {
-    return JSON.stringify({ status: this.lastStatus, paused: this.paused, report: this.lastReport }, null, 2);
+    return JSON.stringify({ status: this.lastStatus, paused: this.paused, report: this.lastReport, account: this.signedInEmail }, null, 2);
   }
 
   private conflictText(): string {

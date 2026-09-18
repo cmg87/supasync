@@ -14,6 +14,7 @@ import {
   type SnapshotItem,
   type VaultInfo,
 } from "@supasync/protocol";
+import { assertPublicApiKey } from "./keys.ts";
 
 export type FetchLike = typeof fetch;
 
@@ -23,6 +24,7 @@ export type SessionProvider = {
 
 export type ClientConfig = {
   url: string;
+  anonKey: string;
   fetch: FetchLike;
   session: SessionProvider;
   functionName?: string;
@@ -31,7 +33,9 @@ export type ClientConfig = {
 export type WireResult<T> = { ok: true; data: T } | { ok: false; error: { code: string; message: string; details?: Record<string, unknown> } };
 
 export class SupaSyncClient {
-  constructor(private readonly config: ClientConfig) {}
+  constructor(private readonly config: ClientConfig) {
+    assertPublicApiKey(config.anonKey);
+  }
 
   async rpc<T>(operation: ApiOperation | string, payload: unknown): Promise<T> {
     const token = await this.config.session.getAccessToken();
@@ -43,7 +47,7 @@ export class SupaSyncClient {
       method: "POST",
       headers: {
         Authorization: `Bearer ${token}`,
-        apikey: token,
+        apikey: this.config.anonKey,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({ operation, payload }),
@@ -200,4 +204,13 @@ function toSnakeEnvelope(envelope: CommitEnvelope): Record<string, unknown> {
 }
 
 export { envelopeDigest };
-export { PasswordAuth, type SecretStore, type StoredSession } from "./auth.ts";
+export type { VaultInfo };
+export {
+  AuthError,
+  PasswordAuth,
+  type SecretStore,
+  type SignUpResult,
+  type StoredSession,
+} from "./auth.ts";
+export { assertPublicApiKey, backendKeyFromUrl, isPublicApiKey, looksLikeSecretKey, sessionSecretId } from "./keys.ts";
+export { decideVaultSelection, vaultAccessible, type VaultDecision } from "./onboarding.ts";

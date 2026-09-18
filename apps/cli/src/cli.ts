@@ -1,7 +1,7 @@
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { PasswordAuth, SupaSyncClient, type SecretStore } from "@supasync/client";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { PasswordAuth, SupaSyncClient, assertPublicApiKey, type SecretStore } from "@supasync/client";
 import { SyncEngine } from "@supasync/sync-core";
 import { FileStore } from "./file-store.ts";
 import { NodeVault } from "./node-vault.ts";
@@ -12,20 +12,27 @@ type Config = {
   vaultId?: string;
 };
 
-const configPath = join(homedir(), ".config", "supasync", "config.json");
-const secretPath = join(homedir(), ".config", "supasync", "session.json");
+const configDir = join(homedir(), ".config", "supasync");
+const configPath = join(configDir, "config.json");
 
 class FileSecrets implements SecretStore {
-  async get(): Promise<string | null> {
+  async get(id: string): Promise<string | null> {
     try {
-      return await readFile(secretPath, "utf8");
+      return await readFile(join(configDir, `${id}.json`), "utf8");
     } catch {
       return null;
     }
   }
-  async set(_id: string, value: string): Promise<void> {
-    await mkdir(join(homedir(), ".config", "supasync"), { recursive: true });
-    await writeFile(secretPath, value);
+  async set(id: string, value: string): Promise<void> {
+    await mkdir(configDir, { recursive: true });
+    if (!value) {
+      await rm(join(configDir, `${id}.json`), { force: true });
+      return;
+    }
+    await writeFile(join(configDir, `${id}.json`), value);
+  }
+  async delete(id: string): Promise<void> {
+    await rm(join(configDir, `${id}.json`), { force: true });
   }
 }
 
@@ -38,7 +45,7 @@ async function loadConfig(): Promise<Config> {
 }
 
 async function saveConfig(config: Config): Promise<void> {
-  await mkdir(join(homedir(), ".config", "supasync"), { recursive: true });
+  await mkdir(configDir, { recursive: true });
   await writeFile(configPath, JSON.stringify(config, null, 2));
 }
 
@@ -55,6 +62,7 @@ async function main() {
     config.url = arg("url", config.url);
     config.anonKey = arg("anon-key", config.anonKey);
     config.vaultId = arg("vault", config.vaultId);
+    if (config.anonKey) assertPublicApiKey(config.anonKey);
     await saveConfig(config);
     console.log("saved", configPath);
     return;
@@ -63,6 +71,14 @@ async function main() {
     throw new Error("run: supasync config --url <url> --anon-key <key>");
   }
   const auth = new PasswordAuth(config.url, config.anonKey, fetch, new FileSecrets());
+  if (cmd === "signup") {
+    const email = arg("email");
+    const password = arg("password");
+    if (!email || !password) throw new Error("signup requires --email and --password");
+    const result = await auth.signUp(email, password);
+    console.log(result.status === "authenticated" ? "signed up" : "confirm email before signing in");
+    return;
+  }
   if (cmd === "login") {
     const email = arg("email");
     const password = arg("password");
@@ -71,7 +87,7 @@ async function main() {
     console.log("signed in");
     return;
   }
-  const client = new SupaSyncClient({ url: config.url, fetch, session: auth });
+  const client = new SupaSyncClient({ url: config.url, anonKey: config.anonKey, fetch, session: auth });
   if (cmd === "vaults") {
     console.log(JSON.stringify(await client.listVaults(), null, 2));
     return;
@@ -115,6 +131,7 @@ async function main() {
   console.log(`supasync ${cmd ?? ""}
 commands:
   config --url --anon-key [--vault]
+  signup --email --password
   login --email --password
   vaults
   create-vault --name
