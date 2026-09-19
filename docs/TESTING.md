@@ -1,90 +1,32 @@
 # Testing
 
-Use a project-local Supabase stack. Do not reset an unrelated instance and do not use a real personal vault.
+Use only project-local Supabase and disposable vault directories. Never run fixture scripts against a production endpoint. Local integration tests create their own fixture accounts and encrypted vaults.
 
 ```bash
+npm ci
+npm run typecheck
+npm run test:unit
+# With the local v2 schema and Edge Function served:
 npm test
-npm run dev:backend
 supabase test db
-```
-
-`npm run dev:backend` is required for plugin-path integration tests: it starts Postgres **and** the `supasync-api` Edge Function. Direct RPC tests can run after `supabase start` alone.
-
-Required families are listed in the architecture plan: CRUD, multi-device, conflicts, delivery failures, durability, journal/snapshot, blob integrity, namespace, authorization, recovery/migration, cleanup, and device UX.
-
-Property tests cover path canon and merge. Three in-memory clients must converge or preserve an explicit conflict copy.
-
-Integration tests create local Auth users and vaults named `supasync-fixture-*`. There is no production “delete any vault” endpoint. Those fixtures belong to their own Auth users, so `listVaults()` for a real account does not show them.
-
-## Platforms
-
-| Target | Status |
-|---|---|
-| Node unit/property tests | runnable with `npm test` |
-| Local Supabase pgTAP | runnable after `supabase start` |
-| Obsidian desktop plugin bundle | `npm run build` |
-| Real Android install | unverified in this environment |
-| Real iOS install | unverified in this environment |
-| Real Cloudflare R2 | unverified until `R2_*` secrets are provided |
-
-A phone's `localhost` is not the desktop. Signed URLs must use a hostname the phone can reach.
-
-## Results recorded 2026-09-18
-
-Commands:
-
-```bash
-npx vitest run          # 56 passed, 1 skipped
-npx tsc --pretty false
 npm run build
-supabase start          # already running, project_id=supasync
-supabase functions serve  # already running; canon.ts duplicate export fixed so workers boot
-supabase test db        # 12/12 pgTAP
+npm pack -w supasync
 ```
 
-| Target | Result |
-|---|---|
-| Node unit/property/sync-core | passed |
-| Password signup/signin/refresh/sign-out and API header regression | passed |
-| Vault onboarding decisions and IndexedDB store isolation | passed |
-| Two Auth users, vault isolation, stale write, idempotent commit | passed against local Supabase |
-| Edge Function path: Auth → JWT → list_vaults → create_vault → register_client | passed |
-| pgTAP grants/RLS | 12 passed |
-| Plugin bundle `apps/obsidian/{main.js,manifest.json,styles.css,versions.json}` | built; no Node `fs`/`path`/`crypto`/`child_process` requires |
-| CLI `apps/cli/dist/cli.js` | built |
-| Real Obsidian desktop onboarding | unverified in this environment |
-| Real Android / iOS install | unverified |
-| Real Cloudflare R2 | unverified (adapter present; needs `R2_*` secrets) |
+The v2 suite covers encryption/authentication failures, independent HKDF vectors, recovery/device envelopes, chunk termination, path validation, merges, exact ciphertext retries after lost responses, two-client note/attachment sync, folder rename identity, competing edits, actor isolation, stale bases, payload rejection, revocation, and concurrent disk-state durability. The plaintext audit inspects scoped v2 rows, outgoing requests/uploads and Edge logs for private markers and plaintext hashes. The optional direct PostgREST denial test requires explicit local environment variables.
 
-Schema/protocol: Postgres `supasync` schema, protocol version `1`, path canon `pathcanon-1`. Attachment limit 25 MiB. Cursors are decimal strings.
+## Installed-package test
 
+Install the tarball in a directory outside the workspace package graph. Set SUPASYNC_HOME to a disposable path, choose an unused gateway port, and run setup twice. Check doctor, create a fixture account/vault, confirm recovery, synchronize notes and attachments between two disposable local folders, and verify hashes. Confirm only loopback gateway ports are bound and no credentials enter connection profiles or package assets.
 
-Record separately against 10,000 small Markdown files: hardware, cold bootstrap time, one-note sync, idle request rate, peak memory. No bandwidth claim is made without those measurements.
+Exercise daemon attach/run/status/sync, concurrent ownership rejection, stop/restart and retry after network interruption. Create a backup, verify its checksums and restore into a separate empty installation. Confirm recovered plaintext with the separately held recovery key.
 
-## Local onboarding follow-up — 2026-09-18
+## Required manual release tests
 
-- `npm test`: **63 passed, 1 skipped** (the existing optional RPC test).
-- `supabase test db --local`: **12 passed**.
-- `supabase db lint --local --schema supasync --level error --fail-on error`: no errors.
-- `npm run typecheck` and `npm run build`: passed.
-- `npm run dev:plugin`: verified creation of a new, preconfigured disposable vault.
-- The real plugin account methods and Obsidian HTTP adapter were exercised against local Auth and Edge Functions: signup, wrong password, sign-in, automatic vault selection, first Markdown upload, a second installation downloading it, session restoration/refresh, manual sync with auto-sync disabled, and sign-out isolation.
-- Host APIs, SecretStorage, IndexedDB and vault files in that integration test use memory substitutes. This is **not** a claim of real Obsidian desktop UI verification; desktop/mobile UI remains unverified.
+1. Desktop: install plugin into a disposable vault, sign up, verify recovery, create/rename/edit/delete text and binary files, preserve competing edits, restart Obsidian, and confirm convergence.
+2. Daemon: configure delegation, install the per-user service, reboot the host, edit while Obsidian is closed, reopen it and verify single ownership and convergence. Test macOS and Windows service definitions on those operating systems.
+3. Tailnet: verify private HTTPS on a second device, then temporarily disconnect/reconnect the host and client.
+4. Android and iOS: import the public profile, sign in, enroll via recovery and via device approval, sync notes/attachments, background/foreground the app and reconcile offline edits. Verify no desktop daemon or Node APIs are required.
+5. Scale: test representative large vaults and attachments under mobile memory limits. The current framed implementation buffers a complete object and has not met the streaming/performance release gate.
 
-The full plugin test found and now guards against a snapshot bootstrap failure (`max(uuid)` is unsupported by Postgres). Migration `20260918200421_fix_snapshot_uuid_cursor.sql` replaces it with a UUID-ordered cursor and is applied to the project-local database. No production project or personal vault was used.
-
-To reproduce the UI check, keep `npm run dev:backend` running, run `npm run dev:plugin`, open the printed folder in Obsidian 1.11.4+, enable community plugins, and open Settings → SupaSync. Create an account and expect **Up to date**. Make a second disposable vault using the same command, sign in to the same account, and verify that edits to a Markdown note arrive in both directions. Restart Obsidian and verify the account remains connected; sign out in one vault and confirm the other still syncs.
-
-### SecretStorage ID regression — 2026-09-18
-
-A real Obsidian screenshot revealed that the old project-plus-installation secret ID exceeded the host's 64-character limit. The plugin now derives a 64-character lowercase ID from a hash of both complete inputs. The simulated SecretStorage now validates IDs on reads and writes, so this host constraint is covered by the real local-backend onboarding test. Targeted verification: 5 tests passed (session/store isolation and plugin auth lifecycle), TypeScript and plugin build passed. This does not replace real desktop UI verification.
-
-### Build output
-
-`npm run build` now creates the installable plugin at repository-root `dist/obsidian/`, containing `main.js`, `manifest.json`, `styles.css`, and `versions.json`. The Obsidian workspace production build and `npm run dev:plugin` produce the same package; the disposable installer copies from it. `npm run release` uses this build path. The CLI output remains `apps/cli/dist/cli.js`.
-
-### Local attachment transfer regression — 2026-09-18
-
-Adding a binary attachment reproduced `fetch failed` after successful authentication: local Edge Functions returned `http://kong:8000/storage/v1/...`, and the sync engine bypassed the Obsidian HTTP adapter. The client now maps that specific internal Storage origin to its configured API origin, preserving signed paths/tokens and leaving external providers unchanged. Plugin attachment uploads/downloads use `requestUrl`; HTTP failures stop processing, and downloads must match the verified hash and length before being written.
-
-The local plugin integration test now uploads and downloads a binary attachment as well as Markdown, and asserts both transfers use the host adapter. Full suite at this step: 68 passed, 1 existing optional test skipped. Two additional targeted download-failure/integrity checks also passed afterward (6 sync-engine tests total). TypeScript and build passed. This verifies local real Storage through a simulated Obsidian host; real desktop/mobile interaction remains unverified.
+Record actual results in V2-IMPLEMENTATION.md. Automated tests are not evidence that mobile, reboot, private HTTPS or large-vault performance passed.

@@ -40,6 +40,7 @@ export type OutboxRow = {
   extras: { pathKey?: string; textSha256?: string };
   status: "queued" | "in_flight" | "done";
   sentHash: string | null;
+  wire?: unknown;
 };
 
 export type ApplyIntent = {
@@ -63,6 +64,8 @@ export type MetaState = {
 };
 
 export interface LocalStore {
+  getCache<T>(key: string): Promise<T | null>;
+  putCache(key: string, value: unknown): Promise<void>;
   getMeta(): Promise<MetaState>;
   putMeta(meta: MetaState): Promise<void>;
   getManifest(): Promise<Map<string, ManifestRow>>;
@@ -78,6 +81,7 @@ export interface LocalStore {
 }
 
 export type SyncApi = {
+  readBlob?(blobId: string): Promise<Uint8Array>;
   capabilities(vaultId: string): Promise<{
     serverEpoch: string;
     headSeq: string;

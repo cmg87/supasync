@@ -1,24 +1,11 @@
-# Protocol
+# Protocol 2
 
-Protocol version: `1`  
-Path canonicalizer: `pathcanon-1` (NFC display path, NFC + Unicode lower-case + `ß→ss` comparison key)
+POST `/functions/v1/supasync-api` with `{protocolVersion:2, operation, payload}`. Send the authenticated user's JWT as Authorization and the public Supabase key as apikey. Protocol 1 is rejected. Private RPC calls require an actor and verified Auth session ID, supplied only by the gateway.
 
-Cursors are decimal strings. Hashes are lowercase SHA-256 hex of exact UTF-8 bytes. Markdown is never YAML-parsed during sync.
+Operations cover encrypted vault creation/listing, client registration, capabilities, recovery envelopes, pairing/revocation, ciphertext reservation/finalization/download, commits, snapshots, paged journal/history and applied acknowledgments. Wire entries contain a stable UUID, parent UUID, encrypted basename, opaque sibling token, name-encryption object ID, entry kind, content object ID and key version. No plaintext path, content hash, text or MIME label is accepted in a commit.
 
-## Envelope
+A mutation carries a UUID operation ID, client identity/generation, server epoch and exact base revision. Its canonical JSON digest is stored with the result. Identical retries return the original receipt; changed payloads under the same ID fail. Stale writes produce a conflict result. Vault-row locking serializes entry updates, ordered revisions and receipts in one transaction. Folder moves update the folder entry; descendant IDs and content ciphertext remain unchanged.
 
-Every mutation includes `protocolVersion`, `serverEpoch`, `vaultId`, `clientId`, `clientGeneration`, `operationId`, `type`, optional `entryId`, optional `baseRevisionId`, and an immutable `payload`. The gateway recomputes `requestDigest` from the canonical JSON of those fields.
+Clients persist exact encrypted payloads before network activity. Object reservations bind random object ID, actor, ciphertext hash and length. Finalization verifies staging bytes and writes those exact bytes to an immutable final key. A revision cannot reference an unready object.
 
-Identical `operationId` + digest returns the original outcome. The same `operationId` with a different digest fails with `ID_REUSE`. A conflict is a completed outcome; the follow-up uses a new operation ID.
-
-## Operations
-
-`capabilities`, `list_vaults`, `create_vault`, `register_client`, `begin_snapshot`, `list_snapshot`, `get_revisions`, `get_bodies`, `pull_changes`, `commit`, `rename_tree`, `delete_tree`, `ack_applied`, `begin_blob_upload`, `finalize_blob`, `get_blob_download`, `list_history`, `restore_revision`, `create_conflict_copy`, `resolve_conflict`, `start_storage_migration`, `migration_status`, `add_member`.
-
-Creates require an unused path. Updates and deletes require the exact current `baseRevisionId` (the revision sequence as a decimal string). Folder rename/delete are namespace transactions.
-
-## Errors
-
-`AUTH_REQUIRED`, `PERMISSION_DENIED`, `BASE_CONFLICT`, `PATH_COLLISION`, `STALE_NAMESPACE`, `CURSOR_EXPIRED`, `EPOCH_MISMATCH`, `CLIENT_GENERATION_EXPIRED`, `BLOB_NOT_READY`, `HASH_MISMATCH`, `LIMIT_EXCEEDED`, `PROTOCOL_UPGRADE_REQUIRED`, plus retryable transport/storage codes.
-
-Authentication errors pause for sign-in. Protocol conflicts are not retried unchanged.
+The client reconciles decrypted data locally. Received and applied cursors are separate; an acknowledgment advances only after durable application. Polling/manual sync works independently of Realtime. Empty listings are never sufficient proof of deletion. History and ciphertext are currently retained indefinitely; maintenance does not prune them.

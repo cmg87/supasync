@@ -3,10 +3,10 @@ import type { ApplyIntent, LocalStore, ManifestRow, MetaState, OutboxRow } from 
 
 function openDb(name: string): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
-    const req = indexedDB.open(name, 1);
+    const req = indexedDB.open(name, 2);
     req.onupgradeneeded = () => {
       const db = req.result;
-      for (const store of ["meta", "manifest", "outbox", "intents"]) {
+      for (const store of ["meta", "manifest", "outbox", "intents", "cache"]) {
         if (!db.objectStoreNames.contains(store)) db.createObjectStore(store);
       }
     };
@@ -23,6 +23,12 @@ function req<T>(request: IDBRequest<T>): Promise<T> {
 }
 
 export class IndexedDbStore implements LocalStore {
+  async getCache<T>(key: string): Promise<T | null> {
+    const db = await this.db(); return (await req<T | undefined>(db.transaction("cache").objectStore("cache").get(key))) ?? null;
+  }
+  async putCache(key: string, value: unknown): Promise<void> {
+    const db = await this.db(); const tx = db.transaction("cache", "readwrite"); tx.objectStore("cache").put(value, key); await complete(tx);
+  }
   constructor(private readonly name: string) {}
 
   private dbPromise?: Promise<IDBDatabase>;

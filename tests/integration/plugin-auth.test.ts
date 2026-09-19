@@ -52,7 +52,7 @@ function plugin(email: string) {
   } as unknown as App;
   const instance = new SupaSyncPlugin(app, {} as never);
   instance.app = app;
-  instance.settings = { supabaseUrl: url, anonKey: anon, email, vaultId: "", deviceLabel: "test", autoSync: true, installationId: crypto.randomUUID() };
+  instance.settings = { supabaseUrl: url, anonKey: anon, email, vaultId: "", deviceLabel: "test", autoSync: true, daemonEnabled: false, installationId: crypto.randomUUID() };
   return { instance, vault, secrets };
 }
 
@@ -65,6 +65,10 @@ describe("plugin sign-up → auth → ready", () => {
     first.instance.settings.autoSync = false;
     first.instance.pendingPassword = "local-test-password";
     await first.instance.createAccount();
+    const recovery = first.instance.recoveryToSave;
+    expect(recovery).toMatch(/^ssr1-/);
+    first.instance.pendingRecovery = recovery!;
+    await first.instance.unlockEncryption();
     expect(first.instance.statusLabel(), first.instance.authMessage).toBe("Ready");
     await first.instance.syncNow();
     expect(first.instance.signedInEmail).toBe(email);
@@ -81,6 +85,9 @@ describe("plugin sign-up → auth → ready", () => {
     expect(second.instance.pendingPassword).toBe("");
     second.instance.pendingPassword = "local-test-password";
     await second.instance.signIn();
+    expect(second.instance.encryptionStatus).toBe("Locked");
+    second.instance.pendingRecovery = recovery!;
+    await second.instance.unlockEncryption();
     expect(second.instance.statusLabel(), second.instance.authMessage).toBe("Up to date");
     expect(second.instance.settings.vaultId).toBe(first.instance.settings.vaultId);
     expect(await second.vault.readText("Hello.md")).toBe("# Hello from the plugin\n");
@@ -100,7 +107,7 @@ describe("plugin sign-up → auth → ready", () => {
     expect(resumed.statusLabel(), resumed.authMessage).toBe("Up to date");
     await first.instance.signOut();
     expect(first.instance.signedInEmail).toBeNull();
-    expect([...first.secrets.values()].every((value) => !value)).toBe(true);
+    expect([...first.secrets.values()].filter(Boolean).every(value => !JSON.parse(value).accessToken)).toBe(true);
     await second.instance.refreshVaults(); // Signing out one installation must not revoke another.
     expect(second.instance.remoteVaults).toHaveLength(1);
     first.instance.pendingPassword = "local-test-password";

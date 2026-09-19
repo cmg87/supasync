@@ -1,129 +1,200 @@
-/**
- * Direct RPC tests. They create local fixture Auth users and vaults whose
- * names start with `supasync-fixture-`. The plugin never lists those rows
- * unless the signed-in actor owns them.
- */
-import { describe, expect, it } from "vitest";
-
+import { expect, it } from "vitest";
+import { PasswordAuth, SupaSyncClient, VaultKeys } from "@supasync/client";
+import {
+  deviceKeypair,
+  wrapDevice,
+  unwrapDevice,
+  type DeviceEnvelope,
+  encryptName,
+  nameToken,
+} from "@supasync/crypto";
 const url = process.env.SUPABASE_URL ?? "http://127.0.0.1:54321";
-const anon = process.env.SUPABASE_ANON_KEY ?? "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0";
-const service = process.env.SUPABASE_SERVICE_ROLE_KEY ?? "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU";
-
-async function signup(email: string, password: string): Promise<{ id: string; token: string }> {
-  const res = await fetch(`${url}/auth/v1/signup`, {
-    method: "POST",
-    headers: { apikey: anon, "Content-Type": "application/json" },
-    body: JSON.stringify({ email, password }),
-  });
-  const body = await res.json() as { id?: string; user?: { id: string }; access_token?: string; error?: string };
-  if (!res.ok && !body.access_token) {
-    const login = await fetch(`${url}/auth/v1/token?grant_type=password`, {
-      method: "POST",
-      headers: { apikey: anon, "Content-Type": "application/json" },
-      body: JSON.stringify({ email, password }),
-    });
-    const session = await login.json() as { access_token: string; user: { id: string } };
-    return { id: session.user.id, token: session.access_token };
-  }
-  const token = body.access_token ?? (
-    await (await fetch(`${url}/auth/v1/token?grant_type=password`, {
-      method: "POST",
-      headers: { apikey: anon, "Content-Type": "application/json" },
-      body: JSON.stringify({ email, password }),
-    })).json() as { access_token: string }
-  ).access_token;
-  return { id: (body.user?.id ?? body.id) as string, token };
-}
-
-async function rpc(actorId: string, op: string, request: unknown, key = service) {
-  const res = await fetch(`${url}/rest/v1/rpc/supasync_rpc`, {
-    method: "POST",
-    headers: {
-      apikey: key,
-      Authorization: `Bearer ${key}`,
-      "Content-Type": "application/json",
+// The development gateway accepts this public key; no service credential is used by clients.
+const localAnon =
+  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0";
+async function user() {
+  const map = new Map<string, string>();
+  const secrets = {
+    get: async (k: string) => map.get(k) ?? null,
+    set: async (k: string, v: string) => {
+      map.set(k, v);
     },
-    body: JSON.stringify({ p_op: op, p_actor_id: actorId, p_request: request }),
-  });
-  return { status: res.status, body: await res.json() };
+  };
+  const auth = new PasswordAuth(
+    url,
+    process.env.SUPABASE_ANON_KEY ?? localAnon,
+    fetch,
+    secrets,
+  );
+  await auth.signUp(
+    `supasync-fixture-${crypto.randomUUID()}@example.test`,
+    "test-password-v2",
+  );
+  return {
+    auth,
+    client: new SupaSyncClient({
+      url,
+      anonKey: process.env.SUPABASE_ANON_KEY ?? localAnon,
+      fetch,
+      session: auth,
+    }),
+    keys: new VaultKeys(secrets, url, "test"),
+  };
 }
-
-describe("two-user authorization against local supabase", () => {
-  it("isolates vaults and rejects stale writes", async () => {
-    const owner = await signup(`supasync-fixture-owner-${Date.now()}@example.test`, "test-password-1");
-    const other = await signup(`supasync-fixture-other-${Date.now()}@example.test`, "test-password-2");
-    const created = await rpc(owner.id, "create_vault", { name: `supasync-fixture-Alpha-${Date.now()}` });
-    expect(created.status).toBe(200);
-    expect(created.body.ok).toBe(true);
-    const vaultId = created.body.data.vault.id as string;
-
-    const outsider = await rpc(other.id, "capabilities", { vault_id: vaultId });
-    expect(outsider.body.ok).toBe(false);
-    expect(outsider.body.error.code).toBe("PERMISSION_DENIED");
-
-    const clientId = crypto.randomUUID();
-    const registered = await rpc(owner.id, "register_client", {
-      vault_id: vaultId,
-      client_id: clientId,
-      label: "test",
-      platform: "test",
-    });
-    expect(registered.body.ok).toBe(true);
-    const caps = await rpc(owner.id, "capabilities", { vault_id: vaultId });
-    const epoch = caps.body.data.serverEpoch as string;
-    const entryId = crypto.randomUUID();
-    const op1 = crypto.randomUUID();
-    const first = await rpc(owner.id, "commit", {
+it("v2 enforces actor isolation, exact retries, stale bases, encrypted-only payloads and revocation", async () => {
+  const owner = await user();
+  const other = await user();
+  const vaultId = crypto.randomUUID();
+  const prepared = await owner.keys.prepare(vaultId, "private test");
+  await owner.client.rpc("create_vault", prepared);
+  await owner.keys.recover(
+    vaultId,
+    prepared.recoveryEnvelope,
+    (await owner.keys.pendingRecovery(vaultId))!,
+  );
+  const key = (await owner.keys.get(vaultId))!;
+  const clientId = crypto.randomUUID();
+  await owner.client.registerClient({
+    vaultId,
+    clientId,
+    label: "test",
+    platform: "test",
+  });
+  await expect(other.client.rpc("capabilities", { vaultId })).rejects.toThrow(
+    "PERMISSION_DENIED",
+  );
+  const caps = await owner.client.rpc<{ serverEpoch: string }>("capabilities", {
+    vaultId,
+  });
+  const entryId = crypto.randomUUID();
+  const nameObjectId = crypto.randomUUID();
+  const envelope = {
+    protocolVersion: 2,
+    cryptoVersion: 1,
+    serverEpoch: caps.serverEpoch,
+    vaultId,
+    clientId,
+    clientGeneration: 1,
+    operationId: crypto.randomUUID(),
+    entryId,
+    type: "create",
+    payload: {
+      parentEntryId: null,
+      nameObjectId,
+      encryptedName: encryptName(key, "folder", {
+        vaultId,
+        entryId,
+        objectId: nameObjectId,
+        keyVersion: 1,
+      }),
+      nameToken: nameToken(key, vaultId, null, "folder"),
+      kind: "folder",
+      objectId: null,
+      keyVersion: 1,
+    },
+  };
+  const accepted = await owner.client.rpc<{ revision: { seq: string } }>(
+    "commit",
+    { vaultId, clientId, envelope },
+  );
+  expect(
+    await owner.client.rpc("commit", { vaultId, clientId, envelope }),
+  ).toEqual(accepted);
+  await expect(
+    owner.client.rpc("commit", {
+      vaultId,
+      clientId,
+      envelope: { ...envelope, type: "delete" },
+    }),
+  ).rejects.toThrow("ID_REUSE");
+  expect(
+    await owner.client.rpc("commit", {
+      vaultId,
+      clientId,
       envelope: {
-        protocol_version: 1,
-        server_epoch: epoch,
-        vault_id: vaultId,
-        client_id: clientId,
-        client_generation: 1,
-        operation_id: op1,
-        type: "create",
-        entry_id: entryId,
-        payload: { path: "a.md", kind: "markdown", text: "one\n" },
-      },
-      request_digest: "digest-1",
-      path_key: "a.md",
-      text_sha256: null,
-    });
-    expect(first.body.ok).toBe(true);
-    const seq = first.body.data.revision.seq as string;
-    const replay = await rpc(owner.id, "commit", {
-      envelope: {
-        protocol_version: 1,
-        server_epoch: epoch,
-        vault_id: vaultId,
-        client_id: clientId,
-        client_generation: 1,
-        operation_id: op1,
-        type: "create",
-        entry_id: entryId,
-        payload: { path: "a.md", kind: "markdown", text: "one\n" },
-      },
-      request_digest: "digest-1",
-      path_key: "a.md",
-    });
-    expect(replay.body.data.revision.seq).toBe(seq);
-    const stale = await rpc(owner.id, "commit", {
-      envelope: {
-        protocol_version: 1,
-        server_epoch: epoch,
-        vault_id: vaultId,
-        client_id: clientId,
-        client_generation: 1,
-        operation_id: crypto.randomUUID(),
+        ...envelope,
         type: "update",
-        entry_id: entryId,
-        base_revision_id: "0",
-        payload: { path: "a.md", text: "two\n" },
+        baseRevisionId: "0",
+        operationId: crypto.randomUUID(),
       },
-      request_digest: "digest-2",
-      path_key: "a.md",
-    });
-    expect(stale.body.ok).toBe(false);
-    expect(stale.body.error.code).toBe("BASE_CONFLICT");
-  }, 30_000);
-});
+    }),
+  ).toMatchObject({ outcome: "conflict" });
+  await expect(
+    owner.client.rpc("commit", {
+      vaultId,
+      clientId,
+      envelope: {
+        ...envelope,
+        operationId: crypto.randomUUID(),
+        entryId: crypto.randomUUID(),
+        payload: { ...envelope.payload, path: "plaintext" },
+      },
+    }),
+  ).rejects.toThrow();
+  const recipient = deviceKeypair();
+  const newClientId = crypto.randomUUID();
+  const pairingId = crypto.randomUUID();
+  await owner.client.registerClient({
+    vaultId,
+    clientId: newClientId,
+    label: "new device",
+    platform: "test",
+  });
+  await owner.client.rpc("pair_begin", {
+    vaultId,
+    clientId: newClientId,
+    pairingId,
+    publicKey: recipient.publicKey,
+  });
+  const context = {
+    vaultId,
+    entryId: newClientId,
+    objectId: pairingId,
+    purpose: "device" as const,
+    keyVersion: 1,
+  };
+  await owner.client.rpc("pair_approve", {
+    vaultId,
+    clientId,
+    pairingId,
+    envelope: wrapDevice(key, recipient.publicKey, context),
+  });
+  const paired = await owner.client.rpc<{ envelope: DeviceEnvelope }>(
+    "pair_get",
+    { vaultId, clientId: newClientId, pairingId },
+  );
+  expect(unwrapDevice(paired.envelope, recipient.privateKey, context)).toEqual(
+    key,
+  );
+  await expect(
+    owner.client.rpc("pair_consume", { vaultId, clientId, pairingId }),
+  ).rejects.toThrow("PERMISSION_DENIED");
+  await owner.client.rpc("pair_consume", {
+    vaultId,
+    clientId: newClientId,
+    pairingId,
+  });
+  await expect(
+    owner.client.rpc("pair_get", { vaultId, clientId: newClientId, pairingId }),
+  ).rejects.toThrow("PAIRING_EXPIRED");
+  recipient.privateKey.fill(0);
+  await owner.client.rpc("revoke_device", {
+    vaultId,
+    clientId,
+    targetClientId: clientId,
+  });
+  await expect(owner.client.rpc("get_vault_keys", { vaultId })).rejects.toThrow(
+    "CLIENT_REVOKED",
+  );
+  await expect(
+    owner.client.registerClient({
+      vaultId,
+      clientId: crypto.randomUUID(),
+      label: "bypass",
+      platform: "test",
+    }),
+  ).rejects.toThrow("CLIENT_REVOKED");
+  key.fill(0);
+  await owner.auth.signOut();
+  await other.auth.signOut();
+}, 30000);

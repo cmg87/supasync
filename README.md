@@ -1,97 +1,77 @@
-# SupaSync
+# SupaSync v2
 
-Bidirectional Obsidian vault synchronization. Each device keeps a real vault. Supabase Postgres stores Markdown and the ordered revision journal. Attachments live in private Supabase Storage or Cloudflare R2.
+End-to-end encrypted Obsidian vault synchronization through Supabase Auth, Postgres, and Supabase Storage. File contents, attachment contents, vault labels, and basenames are encrypted on the client. The backend stores ciphertext, opaque IDs, encrypted names, and an ordered revision journal.
 
-This is an implementation of `SupaSync-Architecture-and-Build-Plan.md`. It is not a CRDT editor and it is not end-to-end encrypted in v1.
+This branch is a **v2 development release**, protocol 2 / crypto 1. It breaks compatibility with plaintext v1. Read [verification status](docs/V2-IMPLEMENTATION.md) before using it for important notes. Keep an independent vault backup and your encryption recovery key.
 
-## Packages
+## Build and install locally
 
-- `packages/protocol` — envelopes, errors, path canon, hashes
-- `packages/client` — authenticated API + password auth
-- `packages/sync-core` — replica engine, merge, recovery
-- `apps/obsidian` — community plugin (`isDesktopOnly: false`)
-- `apps/cli` — Hermes / headless client
-- `supabase` — schema, RPCs, Edge Functions
-
-## Plugin setup
-
-From the repository root, build the plugin:
+Requires Node.js 22 or newer. Local hosting also requires Git, Docker Engine/Desktop and Docker Compose. Docker must already be available to your user; setup does not silently install privileged system software.
 
 ```bash
-npm install
+npm ci
+npm run typecheck
 npm run build
 ```
 
-The installable plugin is in **`dist/obsidian/`** at the repository root:
+The build creates **`dist/obsidian/`** containing `main.js`, `manifest.json`, `styles.css`, and `versions.json`. Copy those files into `<your-vault>/.obsidian/plugins/supasync/`, restart Obsidian, and enable SupaSync in Settings → Community plugins. Obsidian 1.11.4 or newer is required for SecretStorage. Desktop and mobile use the same bundle.
 
-```text
-dist/obsidian/
-  main.js
-  manifest.json
-  styles.css
-  versions.json
-```
-
-Copy those four files into `<vault>/.obsidian/plugins/supasync/` (create the folder if needed). When updating, replace those files and keep any existing `data.json`. Restart Obsidian, turn off Restricted mode under **Settings → Community plugins**, and enable **SupaSync** under **Installed plugins**. Obsidian 1.11.4 or newer is required.
-
-`npm run release` builds the same installable folder. The CLI build remains at `apps/cli/dist/cli.js`. For a preconfigured disposable local vault, use the quick start below.
-
-In plugin settings:
-
-1. Enter the Supabase project URL and the **publishable / anon** key. Never paste a secret or service-role key.
-2. Enter an email and password, then **Create account** or **Sign in**.
-3. If the project requires email confirmation, confirm the message and sign in afterward.
-4. SupaSync lists only vaults this account can access. A first-time account gets a remote vault named after the current Obsidian vault. If several vaults exist, choose one from the dropdown or create another by name.
-5. Sync starts. Use **Sync now** if auto-sync is off.
-
-You do not open Supabase Studio, write SQL, use the CLI, or paste a vault UUID to start syncing. The remote vault id is stored internally and shown only under Advanced.
-
-The password is used for that one sign-in or signup and is not saved in plugin settings. Session tokens are stored in Obsidian SecretStorage, scoped to the Supabase project and plugin installation. Signing out revokes only that installation’s session. Existing installations using the earlier shared session key need to sign in once after updating.
-
-## Development
-
-Node 22+, Docker, and the Supabase CLI are required for the backend.
+The CLI bundle is `apps/cli/dist/cli.js`. To test the actual npm distribution:
 
 ```bash
-npm install
-npm test
-npm run build
-npm run dev:backend
+npm pack -w supasync
+npm install -g ./supasync-0.2.0.tgz
+supasync --version
+supasync setup --mode local --dry-run
+supasync setup --mode local --port 8000 --vault-path /absolute/path/to/test-vault
 ```
 
-`npm run dev:backend` starts the local Supabase stack **and** serves the Edge Functions the plugin calls. Hosted Supabase deploys those functions separately; production does not use this command.
+The tarball includes the CLI, daemon, plugin assets, Edge Functions and v2 schema. It does not require a repository checkout or unpublished workspace dependencies. `npx supasync setup` is the intended published entry point; **this branch has not been published to npm**, so install the locally built tarball to test this implementation.
 
-### Local plugin quick start
+## Connect and sync
 
-With `npm run dev:backend` running in one terminal, run this in another:
+1. Run setup using an explicitly selected test vault. Normal local mode installs a pinned official Supabase Docker distribution, bound to loopback. It does not use `supabase start`.
+2. Open SupaSync settings in Obsidian. Setup writes the connection fields into the selected vault's plugin settings. On another device, import `connection.json` or scan the `connection.png` QR from your installation directory.
+3. Create an account or sign in. SupaSync creates or selects an encrypted remote vault.
+4. Save the displayed recovery key **outside the synced vault**, then enter it again to verify. Sync remains locked until verification succeeds.
+5. Enable auto sync or use Sync now. On another installation, sign in to the same account and unlock with the recovery key, or approve its pairing request from an unlocked device.
+
+An account password reset does not recover encryption keys. Connection QR codes contain only public connection information. Recovery QR codes contain a decryption secret; keep them private.
+
+## Deployment modes
+
+- `local`: loopback access on this computer.
+- `local-tailnet`: private HTTPS through Tailscale Serve. Requires an installed, signed-in Tailscale client. It never enables Funnel.
+- `existing` / `managed`: connect to an operator-provisioned v2 endpoint using `--url` and `--anon-key`. These modes validate health; they do not deploy to a remote production project.
+- `developer`: explicit Supabase CLI development mode. See [deployment instructions](docs/DEPLOYMENT.md).
+
+State defaults to `~/.config/supasync`; override with `SUPASYNC_HOME` or `--home`. Backend configuration, credentials, daemon state and queues stay outside the vault. CLI credentials currently use a disclosed user-only file fallback (0700 directories, 0600 files). Plugin tokens and vault keys use Obsidian SecretStorage.
+
+## Optional desktop daemon
+
+Mobile requires no daemon. Desktop works in-process by default.
+
+For continuous headless synchronization, first authenticate and unlock the CLI using the same account and recovery key:
 
 ```bash
-npm run dev:plugin
+supasync login --email you@example.com
+supasync vault list
+supasync recovery verify --vault VAULT_ID
 ```
 
-This builds the plugin and creates a **new disposable vault** under `test-vaults/`, with the local URL and public key already configured. Open the printed folder as a vault in Obsidian 1.11.4+, enable community plugins if prompted, and open **Settings → SupaSync**. Create an account or sign in. Local sign-up confirms immediately; SupaSync creates/selects the remote vault and starts syncing.
+In the desktop plugin, enable **Delegate sync to daemon** to pause its in-process engine. Then:
 
-Run the command again for a second disposable vault and sign in with the same account to test sync. The installer never opens or modifies a personal vault. Keep the backend terminal running. Auth failures remain visible in settings; passwords are cleared after each attempt. The connection settings are under **Supabase connection**.
+```bash
+supasync vault attach --vault VAULT_ID --dir /absolute/path/to/vault
+supasync daemon run
+# In another terminal:
+supasync daemon token
+```
 
-Never put a service-role key in plugin settings.
+Paste that local token into the plugin's daemon setting. When delegation is enabled, a missing daemon leaves sync paused. Turning delegation off requires the running daemon to release ownership. To run at login, use `supasync service install`; per-user service definitions are provided for Linux, macOS and Windows. Only the Linux foreground daemon is exercised here; actual login/reboot and other operating systems remain unverified.
 
 ## Troubleshooting
 
-If sign-up or sign-in reports **“Secret ID is invalid … 64 characters max”**, update the installed plugin's `main.js` to the latest build and reload the plugin. Earlier builds generated session IDs that exceeded Obsidian's limit. The corrected build uses a bounded hash of the backend URL and installation ID. If signup already created your account, use **Sign in** afterward.
+Run `supasync doctor` and `supasync backend status`. If the plugin is missing, check the folder name and the four files above, then restart Obsidian and enable Community plugins. If sign-in works but sync fails, check the API and Storage health, confirm that the backend runs v2, and replace the plugin with the rebuilt v2 bundle. The plugin uses Obsidian's public request API for network requests; no Node runtime modules are needed.
 
-If sign-in succeeds but sync reports **“Failed to fetch”**, update the plugin from `dist/obsidian/` and keep `npm run dev:backend` running. Earlier builds tried to transfer attachments using Docker-only storage URLs and the browser's network API. The corrected build uses the configured Supabase address for local storage and Obsidian's network adapter. Keep your existing `data.json`, reload the plugin, and select **Sync now**.
-
-## Headless / Hermes
-
-The CLI still supports listing and creating vaults for agents and servers:
-
-```bash
-node apps/cli/dist/cli.js config --url http://127.0.0.1:54321 --anon-key <anon>
-node apps/cli/dist/cli.js signup --email you@example.com --password '…'
-node apps/cli/dist/cli.js login --email you@example.com --password '…'
-node apps/cli/dist/cli.js create-vault --name Notes
-node apps/cli/dist/cli.js vaults
-node apps/cli/dist/cli.js sync --dir /path/to/vault --vault <vault-id>
-```
-
-See `docs/DEPLOYMENT.md`, `docs/TESTING.md`, and `docs/RECOVERY.md`.
+A loopback URL points to the current device. Phones need the host's reachable private HTTPS endpoint, not `127.0.0.1`. See [deployment](docs/DEPLOYMENT.md), [recovery](docs/RECOVERY.md), [security](docs/SECURITY.md), [headless usage](docs/hermes-skill.md), and [tests](docs/TESTING.md).

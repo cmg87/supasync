@@ -66,3 +66,4 @@ export type {
   TextBody,
   VaultInfo,
 } from "./types.ts";
+export * from './v2.ts';

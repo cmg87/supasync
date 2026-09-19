@@ -1,4 +1,3 @@
 #!/usr/bin/env node
-console.log("Create an account from the Obsidian plugin (Create account) or:");
-console.log("  node apps/cli/dist/cli.js signup --email you@example.com --password '…'");
-console.log("Do not create Auth users in Studio and do not commit passwords.");
+console.log("Create an account from SupaSync in Obsidian or run supasync signup --email you@example.com.");
+console.log("Passwords are requested through hidden input. Save and verify your separate recovery key.");

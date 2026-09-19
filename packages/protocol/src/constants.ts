@@ -1,5 +1,5 @@
 export const PLUGIN_ID = "supasync";
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
 export const PATH_CANON_VERSION = "pathcanon-1";
 export const MIN_OBSIDIAN_VERSION = "1.11.4";
 
@@ -24,4 +24,4 @@ export const DEFAULT_LIMITS = {
 } as const;
 
 export const DIAGNOSTIC_PREFIX = "__supasync_diag__";
-export const DEFAULT_STORAGE_BUCKET = "supasync-blobs";
+export const DEFAULT_STORAGE_BUCKET = "supasync-ciphertext";

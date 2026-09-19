@@ -1,34 +1,15 @@
 # Architecture
 
-SupaSync keeps an ordinary Obsidian vault on each device. Postgres is the authority for Markdown, identities, revisions, and ordered history. Object storage holds non-Markdown bytes. The plugin is a replica synchronizer, not a mounted database.
+The v2 specification is `SupaSync-v2-E2EE-Local-First-Architecture.md`. The earlier architecture/build plan describes the v1 baseline and is historical.
 
-```text
-Obsidian / CLI
-  vault adapter
-  sync-core (one engine per local vault)
-  local transactional state (manifest, bases, outbox, inbox, receipts)
-       |
-       +-- Supabase Auth
-       +-- Edge Function `supasync-api`
-       +-- Realtime wake-up hints (vault id + head seq only)
-       +-- short-lived signed HTTP URLs for attachments
-```
+- `packages/protocol`: browser-compatible paths, local models and ciphertext-only wire types.
+- `packages/crypto`: authenticated encryption, key derivation, name tokens, recovery and device envelopes.
+- `packages/client`: Auth, public-key checks, authenticated RPC transport and secret-store key lifecycle.
+- `packages/sync-core`: durable queue, reconciliation, conflict preservation, snapshots and the encryption boundary. Its internal plaintext records never go directly to the v2 server.
+- `apps/obsidian`: public Obsidian APIs, IndexedDB durability, SecretStorage, QR/recovery/pairing and optional loopback daemon delegation.
+- `apps/cli`: bundled npm commands, filesystem adapter, exact-base headless operations and persistent state outside the vault.
+- `apps/daemon`: foreground/background engine with per-vault locks, watchers plus periodic scans and authenticated loopback control.
+- `packages/installer`: pinned official Docker deployment, profiles, plugin installation, service definitions and backup tools.
+- `supabase`: private transactional schema, authenticated Edge API and Supabase Storage ciphertext bucket.
 
-## Trust boundaries
-
-- The Edge Function verifies the user JWT, ignores client-supplied actor IDs, recomputes path keys and content hashes, and calls service-only RPCs.
-- Mutation RPCs are `SECURITY INVOKER`, executable only by `service_role`, and perform their own membership checks because the service role bypasses RLS.
-- Data lives in the non-exposed `supasync` schema. `public` contains `supasync_*` RPC wrappers, an optional `supasync_notes` view, and a Realtime wake-up table.
-- Storage credentials never enter plugin settings. The plugin stores the project URL, public key, and secret-store references only.
-
-## Sequence numbers
-
-`vaults.head_seq` is a per-vault counter updated under `SELECT ... FOR UPDATE` on the vault row. Sequence objects are not used as the commit cursor. JSON transports sequences as decimal strings.
-
-## Local durability
-
-IndexedDB (plugin) or a filesystem JSON store (CLI) holds the manifest, bases, outbox, inbox, apply intents, and cursors. `received_cursor` is not `applied_cursor`. A journal page is not an ack. File application uses a persisted apply intent because the vault and the metadata store are not one transaction.
-
-## Realtime
-
-Wake-ups are optional. Dropped notifications must not prevent convergence. The wakeup row contains only `vault_id` and `head_seq`.
+The daemon is optional. It runs client-side reconciliation and encryption, not server authorization. Edge Functions validate sessions, gate ciphertext operations and invoke transactions; they never receive vault keys. Supabase Storage is the only storage API used by SupaSync.

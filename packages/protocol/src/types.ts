@@ -3,8 +3,14 @@ import type { Seq } from "./seq.ts";
 export type MemberRole = "owner" | "editor" | "reader";
 export type MemberStatus = "enabled" | "revoked";
 export type EntryKind = "markdown" | "blob" | "folder";
-export type StorageProvider = "supabase_storage" | "r2";
-export type BlobState = "reserved" | "uploading" | "finalizing" | "ready" | "failed" | "deleting";
+export type StorageProvider = "supabase_storage";
+export type BlobState =
+  | "reserved"
+  | "uploading"
+  | "finalizing"
+  | "ready"
+  | "failed"
+  | "deleting";
 export type SnapshotState = "active" | "complete" | "expired";
 export type CommitOutcomeKind = "accepted" | "noop" | "conflict";
 
@@ -25,23 +31,21 @@ export type ApiOperation =
   | "register_client"
   | "begin_snapshot"
   | "list_snapshot"
-  | "get_revisions"
-  | "get_bodies"
+  | "get_tree"
   | "pull_changes"
   | "commit"
-  | "rename_tree"
-  | "delete_tree"
   | "ack_applied"
-  | "begin_blob_upload"
-  | "finalize_blob"
-  | "get_blob_download"
+  | "reserve_object"
+  | "finalize_object"
+  | "get_object"
   | "list_history"
-  | "restore_revision"
-  | "create_conflict_copy"
-  | "resolve_conflict"
-  | "start_storage_migration"
-  | "migration_status"
-  | "add_member";
+  | "get_vault_keys"
+  | "list_devices"
+  | "revoke_device"
+  | "pair_begin"
+  | "pair_get"
+  | "pair_approve"
+  | "pair_consume";
 
 export type StorageBackendInfo = {
   id: string;
@@ -54,6 +58,8 @@ export type StorageBackendInfo = {
 };
 
 export type VaultInfo = {
+  encryptedLabel?: import("./v2.ts").EncryptedValue;
+  recoveryEnvelope?: import("./v2.ts").EncryptedValue;
   id: string;
   name: string;
   role: MemberRole;

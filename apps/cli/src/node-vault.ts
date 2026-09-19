@@ -1,5 +1,6 @@
-import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
-import { dirname, join, posix, relative, sep } from "node:path";
+import { mkdir, readFile, readdir, rename, rm, stat, lstat, writeFile } from "node:fs/promises";
+import { dirname, join, posix, relative, sep, resolve } from "node:path";
+import { canonicalizePath } from "@supasync/protocol";
 import type { VaultAdapter, VaultStat } from "@supasync/sync-core";
 
 export class NodeVault implements VaultAdapter {
@@ -23,12 +24,13 @@ export class NodeVault implements VaultAdapter {
     try {
       entries = await readdir(dir);
     } catch {
-      return;
+      throw new Error("Unable to scan vault directory");
     }
     for (const name of entries) {
       const full = join(dir, name);
       const rel = toPosix(relative(this.root, full));
-      const info = await stat(full);
+      const info = await lstat(full);
+      if (info.isSymbolicLink()) continue;
       if (info.isDirectory()) {
         out.push({ path: rel, kind: "folder", byteLength: 0 });
         await this.walk(full, out);
@@ -40,7 +42,7 @@ export class NodeVault implements VaultAdapter {
 
   async exists(path: string): Promise<boolean> {
     try {
-      await stat(this.abs(path));
+      await stat(await this.abs(path));
       return true;
     } catch {
       return false;
@@ -48,39 +50,46 @@ export class NodeVault implements VaultAdapter {
   }
 
   async readText(path: string): Promise<string> {
-    return readFile(this.abs(path), "utf8");
+    return readFile(await this.abs(path), "utf8");
   }
 
   async readBytes(path: string): Promise<Uint8Array> {
-    const buf = await readFile(this.abs(path));
+    const buf = await readFile(await this.abs(path));
     return new Uint8Array(buf);
   }
 
   async writeText(path: string, text: string): Promise<void> {
-    await mkdir(dirname(this.abs(path)), { recursive: true });
-    await writeFile(this.abs(path), text, "utf8");
+    await mkdir(dirname(await this.abs(path)), { recursive: true });
+    await writeFile(await this.abs(path), text, "utf8");
   }
 
   async writeBytes(path: string, bytes: Uint8Array): Promise<void> {
-    await mkdir(dirname(this.abs(path)), { recursive: true });
-    await writeFile(this.abs(path), bytes);
+    await mkdir(dirname(await this.abs(path)), { recursive: true });
+    await writeFile(await this.abs(path), bytes);
   }
 
   async remove(path: string): Promise<void> {
-    await rm(this.abs(path), { recursive: true, force: true });
+    await rm(await this.abs(path), { recursive: true, force: true });
   }
 
   async mkdir(path: string): Promise<void> {
-    await mkdir(this.abs(path), { recursive: true });
+    await mkdir(await this.abs(path), { recursive: true });
   }
 
   async rename(from: string, to: string): Promise<void> {
-    await mkdir(dirname(this.abs(to)), { recursive: true });
-    await rename(this.abs(from), this.abs(to));
+    await mkdir(dirname(await this.abs(to)), { recursive: true });
+    await rename(await this.abs(from), await this.abs(to));
   }
 
-  private abs(path: string): string {
-    return join(this.root, path.split("/").join(sep));
+  private async abs(path: string): Promise<string> {
+    const clean = canonicalizePath(path).display;
+    let current = resolve(this.root);
+    for (const part of clean.split("/")) {
+      current = join(current, part);
+      try { if ((await lstat(current)).isSymbolicLink()) throw new Error("Symlinks are not supported inside a synced vault"); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    }
+    return current;
   }
 }
 
