@@ -74,3 +74,17 @@ Record separately against 10,000 small Markdown files: hardware, cold bootstrap 
 The full plugin test found and now guards against a snapshot bootstrap failure (`max(uuid)` is unsupported by Postgres). Migration `20260918200421_fix_snapshot_uuid_cursor.sql` replaces it with a UUID-ordered cursor and is applied to the project-local database. No production project or personal vault was used.
 
 To reproduce the UI check, keep `npm run dev:backend` running, run `npm run dev:plugin`, open the printed folder in Obsidian 1.11.4+, enable community plugins, and open Settings → SupaSync. Create an account and expect **Up to date**. Make a second disposable vault using the same command, sign in to the same account, and verify that edits to a Markdown note arrive in both directions. Restart Obsidian and verify the account remains connected; sign out in one vault and confirm the other still syncs.
+
+### SecretStorage ID regression — 2026-09-18
+
+A real Obsidian screenshot revealed that the old project-plus-installation secret ID exceeded the host's 64-character limit. The plugin now derives a 64-character lowercase ID from a hash of both complete inputs. The simulated SecretStorage now validates IDs on reads and writes, so this host constraint is covered by the real local-backend onboarding test. Targeted verification: 5 tests passed (session/store isolation and plugin auth lifecycle), TypeScript and plugin build passed. This does not replace real desktop UI verification.
+
+### Build output
+
+`npm run build` now creates the installable plugin at repository-root `dist/obsidian/`, containing `main.js`, `manifest.json`, `styles.css`, and `versions.json`. The Obsidian workspace production build and `npm run dev:plugin` produce the same package; the disposable installer copies from it. `npm run release` uses this build path. The CLI output remains `apps/cli/dist/cli.js`.
+
+### Local attachment transfer regression — 2026-09-18
+
+Adding a binary attachment reproduced `fetch failed` after successful authentication: local Edge Functions returned `http://kong:8000/storage/v1/...`, and the sync engine bypassed the Obsidian HTTP adapter. The client now maps that specific internal Storage origin to its configured API origin, preserving signed paths/tokens and leaving external providers unchanged. Plugin attachment uploads/downloads use `requestUrl`; HTTP failures stop processing, and downloads must match the verified hash and length before being written.
+
+The local plugin integration test now uploads and downloads a binary attachment as well as Markdown, and asserts both transfers use the host adapter. Full suite at this step: 68 passed, 1 existing optional test skipped. Two additional targeted download-failure/integrity checks also passed afterward (6 sync-engine tests total). TypeScript and build passed. This verifies local real Storage through a simulated Obsidian host; real desktop/mobile interaction remains unverified.

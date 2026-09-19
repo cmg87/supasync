@@ -6,7 +6,6 @@ import {
   assertPublicApiKey,
   decideVaultSelection,
   looksLikeSecretKey,
-  sessionSecretId,
   type StoredSession,
   type VaultInfo,
 } from "@supasync/client";
@@ -16,7 +15,7 @@ import { createObsidianFetch } from "./adapters/obsidian-fetch.ts";
 import { IndexedDbStore } from "./adapters/indexeddb-store.ts";
 import { ObsidianVaultAdapter } from "./adapters/obsidian-vault.ts";
 import { SupaSyncSettingTab } from "./settings/tab.ts";
-import { newInstallationId, syncStoreId } from "./sync-state.ts";
+import { installationSessionSecretId, newInstallationId, syncStoreId } from "./sync-state.ts";
 import { CONFLICT_VIEW, ConflictView, HISTORY_VIEW, HistoryView, STATUS_VIEW, StatusView } from "./ui/views.ts";
 
 export interface SupaSyncSettings {
@@ -53,7 +52,7 @@ export default class SupaSyncPlugin extends Plugin {
   private debounceTimer?: number;
   private boundStoreId: string | null = null;
   private booting = false;
-  private auth?: PasswordAuth;
+  private auth?: Promise<PasswordAuth>;
   private authConnection = "";
   private settingTab?: SupaSyncSettingTab;
   private cycleInFlight?: Promise<void>;
@@ -148,7 +147,7 @@ export default class SupaSyncPlugin extends Plugin {
     }
     this.authMessage = "";
     try {
-      const result = await this.getAuth().signUp(this.settings.email, this.pendingPassword);
+      const result = await (await this.getAuth()).signUp(this.settings.email, this.pendingPassword);
       this.pendingPassword = "";
       if (result.status === "confirmation_required") {
         this.signedInEmail = null;
@@ -175,7 +174,7 @@ export default class SupaSyncPlugin extends Plugin {
     }
     this.authMessage = "";
     try {
-      const session = await this.getAuth().signIn(this.settings.email, this.pendingPassword);
+      const session = await (await this.getAuth()).signIn(this.settings.email, this.pendingPassword);
       this.pendingPassword = "";
       this.signedInEmail = session.email;
       new Notice("Signed in to SupaSync");
@@ -192,7 +191,7 @@ export default class SupaSyncPlugin extends Plugin {
     this.resetEngine();
     await this.cycleInFlight;
     try {
-      await this.getAuth().signOut();
+      await (await this.getAuth()).signOut();
       this.authMessage = "Signed out. Your local notes are still here.";
     } catch {
       this.authMessage = "Signed out locally. Server session revocation could not be confirmed.";
@@ -339,6 +338,7 @@ export default class SupaSyncPlugin extends Plugin {
     });
     this.engine = new SyncEngine({
       api: client,
+      fetch: createObsidianFetch(),
       vault: new ObsidianVaultAdapter(this.app),
       store,
       vaultId: this.settings.vaultId,
@@ -393,34 +393,38 @@ export default class SupaSyncPlugin extends Plugin {
     return true;
   }
 
-  private getAuth(): PasswordAuth {
+  private getAuth(): Promise<PasswordAuth> {
     if (!this.app.secretStorage) throw new AuthError("SupaSync requires Obsidian 1.11.4 or newer for secure session storage.");
-    const connection = `${this.settings.supabaseUrl}|${this.settings.anonKey}`;
+    const { supabaseUrl, anonKey, installationId } = this.settings;
+    const connection = JSON.stringify([supabaseUrl, anonKey, installationId]);
     if (this.auth && this.authConnection === connection) return this.auth;
-    this.auth = new PasswordAuth(this.settings.supabaseUrl, this.settings.anonKey, createObsidianFetch(), {
-      get: async (id) => this.app.secretStorage.getSecret(id),
-      set: async (id, value) => {
-        this.app.secretStorage.setSecret(id, value);
-      },
-      delete: async (id) => {
-        this.app.secretStorage.setSecret(id, "");
-      },
-    }, `${sessionSecretId(this.settings.supabaseUrl)}-${this.settings.installationId}`);
+    this.auth = installationSessionSecretId(supabaseUrl, installationId).then((secretId) =>
+      new PasswordAuth(supabaseUrl, anonKey, createObsidianFetch(), {
+        get: async (id) => this.app.secretStorage.getSecret(id),
+        set: async (id, value) => {
+          this.app.secretStorage.setSecret(id, value);
+        },
+        delete: async (id) => {
+          this.app.secretStorage.setSecret(id, "");
+        },
+      }, secretId),
+    );
     this.authConnection = connection;
     return this.auth;
   }
 
   private getClient(): SupaSyncClient {
+    const auth = this.getAuth();
     return new SupaSyncClient({
       url: this.settings.supabaseUrl,
       anonKey: this.settings.anonKey,
       fetch: createObsidianFetch(),
-      session: this.getAuth(),
+      session: { getAccessToken: async () => (await auth).getAccessToken() },
     });
   }
 
   private async readSession(): Promise<StoredSession | null> {
-    const auth = this.getAuth();
+    const auth = await this.getAuth();
     const token = await auth.getAccessToken();
     if (!token) return null;
     return auth.getSession();

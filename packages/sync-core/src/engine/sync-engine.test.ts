@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { MemoryBackend } from "../testing/memory-backend.ts";
 import { MemoryStore } from "../persist/memory-store.ts";
 import { MemoryVault } from "../adapters/memory-vault.ts";
@@ -59,4 +59,39 @@ describe("sync engine", () => {
     await a.engine.cycle();
     expect((await backend.capabilities()).headSeq).toBe(firstHead);
   });
+});
+
+it("does not finalize or commit a blob when its upload fails", async () => {
+  const backend = new MemoryBackend();
+  const vault = new MemoryVault();
+  const store = new MemoryStore({ vaultId: backend.vaultId, serverEpoch: backend.serverEpoch });
+  await vault.writeBytes("attachment.bin", new Uint8Array([1, 2, 3]));
+  vi.spyOn(backend, "beginBlobUpload").mockResolvedValue({
+    blobId: crypto.randomUUID(), stagingKey: "staging", transfer: { url: "https://storage.example.test/upload", method: "PUT", headers: {} },
+  });
+  const finalize = vi.spyOn(backend, "finalizeBlob");
+  const transport = vi.fn<typeof fetch>().mockResolvedValue(new Response("unavailable", { status: 503 }));
+  const engine = new SyncEngine({ api: backend, vault, store, vaultId: backend.vaultId, fetch: transport });
+  await expect(engine.cycle()).rejects.toThrow("Attachment upload failed (HTTP 503)");
+  expect(transport).toHaveBeenCalledOnce();
+  expect(finalize).not.toHaveBeenCalled();
+  expect(await vault.readBytes("attachment.bin")).toEqual(new Uint8Array([1, 2, 3]));
+});
+
+it.each([503, 200])("does not write a failed or corrupt attachment download (HTTP %s)", async (status) => {
+  const backend = new MemoryBackend();
+  const source = await client("source", backend, new MemoryVault());
+  await source.vault.writeBytes("attachment.bin", new Uint8Array([1, 2, 3]));
+  await source.engine.cycle();
+  vi.spyOn(backend, "getBlobDownload").mockResolvedValue({
+    transfer: { url: "https://storage.example.test/download", method: "GET", headers: {} },
+    verifiedSha256: "expected-hash", verifiedLength: 3,
+  });
+  const target = new MemoryVault();
+  const engine = new SyncEngine({
+    api: backend, vault: target, store: new MemoryStore({ vaultId: backend.vaultId }), vaultId: backend.vaultId,
+    fetch: async () => new Response(new Uint8Array([9, 9, 9]), { status }),
+  });
+  await expect(engine.cycle()).rejects.toThrow(status === 503 ? "Attachment download failed" : "integrity verification");
+  expect(await target.exists("attachment.bin")).toBe(false);
 });

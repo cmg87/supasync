@@ -15,7 +15,26 @@ This is an implementation of `SupaSync-Architecture-and-Build-Plan.md`. It is no
 
 ## Plugin setup
 
-Install `apps/obsidian/main.js`, `manifest.json`, `styles.css`, and `versions.json` into `<vault>/.obsidian/plugins/supasync/`, or use BRAT against this repository.
+From the repository root, build the plugin:
+
+```bash
+npm install
+npm run build
+```
+
+The installable plugin is in **`dist/obsidian/`** at the repository root:
+
+```text
+dist/obsidian/
+  main.js
+  manifest.json
+  styles.css
+  versions.json
+```
+
+Copy those four files into `<vault>/.obsidian/plugins/supasync/` (create the folder if needed). When updating, replace those files and keep any existing `data.json`. Restart Obsidian, turn off Restricted mode under **Settings → Community plugins**, and enable **SupaSync** under **Installed plugins**. Obsidian 1.11.4 or newer is required.
+
+`npm run release` builds the same installable folder. The CLI build remains at `apps/cli/dist/cli.js`. For a preconfigured disposable local vault, use the quick start below.
 
 In plugin settings:
 
@@ -55,6 +74,12 @@ This builds the plugin and creates a **new disposable vault** under `test-vaults
 Run the command again for a second disposable vault and sign in with the same account to test sync. The installer never opens or modifies a personal vault. Keep the backend terminal running. Auth failures remain visible in settings; passwords are cleared after each attempt. The connection settings are under **Supabase connection**.
 
 Never put a service-role key in plugin settings.
+
+## Troubleshooting
+
+If sign-up or sign-in reports **“Secret ID is invalid … 64 characters max”**, update the installed plugin's `main.js` to the latest build and reload the plugin. Earlier builds generated session IDs that exceeded Obsidian's limit. The corrected build uses a bounded hash of the backend URL and installation ID. If signup already created your account, use **Sign in** afterward.
+
+If sign-in succeeds but sync reports **“Failed to fetch”**, update the plugin from `dist/obsidian/` and keep `npm run dev:backend` running. Earlier builds tried to transfer attachments using Docker-only storage URLs and the browser's network API. The corrected build uses the configured Supabase address for local storage and Obsidian's network adapter. Keep your existing `data.json`, reload the plugin, and select **Sync now**.
 
 ## Headless / Hermes
 

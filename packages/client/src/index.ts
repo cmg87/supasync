@@ -145,26 +145,43 @@ export class SupaSyncClient {
     });
   }
 
-  beginBlobUpload(input: {
+  async beginBlobUpload(input: {
     vaultId: string;
     expectedSha256: string;
     expectedLength: number;
     mimeHint?: string;
   }): Promise<{ blobId: string; stagingKey: string; transfer?: SignedTransfer } & Record<string, unknown>> {
-    return this.rpc("begin_blob_upload", {
+    const result = await this.rpc<{ blobId: string; stagingKey: string; transfer?: SignedTransfer } & Record<string, unknown>>("begin_blob_upload", {
       vault_id: input.vaultId,
       expected_sha256: input.expectedSha256,
       expected_length: input.expectedLength,
       mime_hint: input.mimeHint,
     });
+    if (result.transfer) result.transfer = this.reachableTransfer(result.transfer);
+    return result;
   }
 
   finalizeBlob(input: { vaultId: string; blobId: string }): Promise<{ blobId: string; state: string }> {
     return this.rpc("finalize_blob", { vault_id: input.vaultId, blob_id: input.blobId });
   }
 
-  getBlobDownload(input: { vaultId: string; blobId: string }): Promise<{ transfer: SignedTransfer; verifiedSha256: string; verifiedLength: number }> {
-    return this.rpc("get_blob_download", { vault_id: input.vaultId, blob_id: input.blobId });
+  async getBlobDownload(input: { vaultId: string; blobId: string }): Promise<{ transfer: SignedTransfer; verifiedSha256: string; verifiedLength: number }> {
+    const result = await this.rpc<{ transfer: SignedTransfer; verifiedSha256: string; verifiedLength: number }>("get_blob_download", { vault_id: input.vaultId, blob_id: input.blobId });
+    return { ...result, transfer: this.reachableTransfer(result.transfer) };
+  }
+
+  private reachableTransfer(transfer: SignedTransfer): SignedTransfer {
+    const url = new URL(transfer.url);
+    // Local Edge Functions sign with their Docker-internal Supabase URL.
+    // Supabase Storage signs the path/token, so its public API origin can be used.
+    // Leave hosted Storage and external providers (including R2) untouched.
+    if (url.origin === "http://kong:8000" && url.pathname.startsWith("/storage/v1/")) {
+      const backend = new URL(this.config.url);
+      url.protocol = backend.protocol;
+      url.host = backend.host;
+      return { ...transfer, url: url.toString() };
+    }
+    return transfer;
   }
 
   listHistory(vaultId: string, entryId: string) {

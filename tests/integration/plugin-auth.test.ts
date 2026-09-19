@@ -5,11 +5,14 @@ import { describe, expect, it, vi } from "vitest";
 import type { App } from "obsidian";
 import { MemoryVault } from "@supasync/sync-core";
 
+const transportPaths = vi.hoisted(() => [] as string[]);
+
 vi.mock("obsidian", () => ({
   Plugin: class { async saveData() {} },
   PluginSettingTab: class {}, Setting: class {}, ItemView: class {}, TFile: class {},
   Notice: class {},
   requestUrl: async (input: { url: string; method: string; headers: Record<string, string>; body?: string }) => {
+    transportPaths.push(new URL(input.url).pathname);
     const res = await fetch(input.url, { method: input.method, headers: input.headers, body: input.body });
     const headers: Record<string, string> = {};
     res.headers.forEach((value, key) => { headers[key] = value; });
@@ -37,9 +40,15 @@ const anon = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vI
 function plugin(email: string) {
   const secrets = new Map<string, string>();
   const vault = new MemoryVault();
+  function validateSecretId(id: string): void {
+    if (!/^[a-z0-9-]{1,64}$/.test(id)) throw new Error("Secret ID is invalid. 64 characters max.");
+  }
   const app = {
     vault: { getName: () => "supasync-fixture-plugin" }, testVault: vault,
-    secretStorage: { getSecret: (id: string) => secrets.get(id) ?? null, setSecret: (id: string, value: string) => secrets.set(id, value) },
+    secretStorage: {
+      getSecret: (id: string) => { validateSecretId(id); return secrets.get(id) ?? null; },
+      setSecret: (id: string, value: string) => { validateSecretId(id); secrets.set(id, value); },
+    },
   } as unknown as App;
   const instance = new SupaSyncPlugin(app, {} as never);
   instance.app = app;
@@ -52,6 +61,7 @@ describe("plugin sign-up → auth → ready", () => {
     const email = `supasync-fixture-plugin-${crypto.randomUUID()}@example.test`;
     const first = plugin(email);
     await first.vault.writeText("Hello.md", "# Hello from the plugin\n");
+    await first.vault.writeBytes("attachment.bin", new Uint8Array([0, 1, 2, 255]));
     first.instance.settings.autoSync = false;
     first.instance.pendingPassword = "local-test-password";
     await first.instance.createAccount();
@@ -74,6 +84,9 @@ describe("plugin sign-up → auth → ready", () => {
     expect(second.instance.statusLabel(), second.instance.authMessage).toBe("Up to date");
     expect(second.instance.settings.vaultId).toBe(first.instance.settings.vaultId);
     expect(await second.vault.readText("Hello.md")).toBe("# Hello from the plugin\n");
+    expect(await second.vault.readBytes("attachment.bin")).toEqual(new Uint8Array([0, 1, 2, 255]));
+    expect(transportPaths.some((path) => path.startsWith("/storage/v1/object/upload/sign/"))).toBe(true);
+    expect(transportPaths.some((path) => path.startsWith("/storage/v1/object/sign/"))).toBe(true);
     // Simulate a restart with a persisted session requiring refresh; no password input.
     for (const [id, raw] of second.secrets) {
       second.secrets.set(id, JSON.stringify({ ...JSON.parse(raw), expiresAt: 0 }));

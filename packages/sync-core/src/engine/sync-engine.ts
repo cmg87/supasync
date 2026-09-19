@@ -20,6 +20,7 @@ export type EngineOptions = {
   store: LocalStore;
   vaultId: string;
   paused?: boolean;
+  fetch?: typeof fetch;
 };
 
 export type SyncReport = {
@@ -189,7 +190,8 @@ export class SyncEngine {
         if (transfer.url.startsWith("memory://")) {
           // in-memory tests skip bytes
         } else {
-          await fetch(transfer.url, { method: transfer.method, headers: transfer.headers, body: bytes as unknown as BlobPart });
+          const response = await (this.opts.fetch ?? fetch)(transfer.url, { method: transfer.method, headers: transfer.headers, body: bytes as unknown as BlobPart });
+          if (!response.ok) throw new ProtocolError("RETRYABLE_TRANSPORT", `Attachment upload failed (HTTP ${response.status})`);
         }
       }
       await this.opts.api.finalizeBlob({ vaultId: this.opts.vaultId, blobId: String(blob.blobId) });
@@ -355,8 +357,12 @@ export class SyncEngine {
         await this.remember(rev, dl.verifiedSha256);
         return;
       }
-      const res = await fetch(dl.transfer.url, { method: dl.transfer.method, headers: dl.transfer.headers });
+      const res = await (this.opts.fetch ?? fetch)(dl.transfer.url, { method: dl.transfer.method, headers: dl.transfer.headers });
+      if (!res.ok) throw new ProtocolError("RETRYABLE_TRANSPORT", `Attachment download failed (HTTP ${res.status})`);
       const bytes = new Uint8Array(await res.arrayBuffer());
+      if (bytes.byteLength !== dl.verifiedLength || await hashBytes(bytes) !== dl.verifiedSha256) {
+        throw new ProtocolError("HASH_MISMATCH", "Downloaded attachment failed integrity verification");
+      }
       await this.opts.vault.writeBytes(rev.path, bytes);
       await this.remember(rev, dl.verifiedSha256);
       report.applied++;
