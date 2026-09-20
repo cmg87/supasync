@@ -9,7 +9,7 @@
     "apps/*"
   ],
   "scripts": {
-    "build": "npm run build -w @supasync/obsidian && npm run build -w @supasync/cli",
+    "build": "npm run build -w @supasync/obsidian && npm run build -w supasync && node scripts/package-assets.mjs",
     "typecheck": "tsc --pretty false",
     "test": "vitest run",
     "test:watch": "vitest",

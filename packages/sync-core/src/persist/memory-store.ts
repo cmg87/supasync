@@ -2,6 +2,9 @@ import { seqZero } from "@supasync/protocol";
 import type { ApplyIntent, LocalStore, ManifestRow, MetaState, OutboxRow } from "../types.ts";
 
 export class MemoryStore implements LocalStore {
+  private cache = new Map<string, unknown>();
+  async getCache<T>(key: string): Promise<T | null> { return (this.cache.get(key) as T) ?? null; }
+  async putCache(key: string, value: unknown): Promise<void> { this.cache.set(key, structuredClone(value)); }
   private meta: MetaState;
   private manifest = new Map<string, ManifestRow>();
   private outbox = new Map<string, OutboxRow>();

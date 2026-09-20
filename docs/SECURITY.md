@@ -1,11 +1,13 @@
-# Security
+# Security model
 
-- Plugin settings may contain the Supabase URL and public/anon key only. Session tokens go in Obsidian `SecretStorage` (1.11.4+). Service-role keys, S3 access keys, and R2 credentials are server-only.
-- Mutation RPCs are executable solely by `service_role`. They still check membership because the service role bypasses RLS.
-- The `supasync` schema is not in the Data API schema list. `public.supasync_notes` is `security_invoker`.
-- Realtime wakeups contain vault id and head sequence, never note bodies.
-- Signed object URLs are bound to an authorized blob id and configured backend. Clients cannot supply an arbitrary bucket or key.
-- Blocking a client id is not the same as revoking an Auth session. Sign out or revoke refresh tokens to invalidate access. Short-lived signed URLs remain valid until they expire.
-- Disconnecting a device does not delete the local vault or reset the remote vault.
+Protocol 2 encrypts Markdown, attachments, basenames and vault labels before upload. The backend sees account identity, opaque vault/entry/object/device IDs, parent-child topology, entry kinds, ciphertext lengths, timing, journal order and opaque sibling-name equality tokens. It cannot perform plaintext search, merge, or content deduplication.
 
-Authentication, RLS, TLS, and provider-side encryption are not end-to-end encryption.
+Cryptography uses pinned noble implementations: XChaCha20-Poly1305 authenticated encryption with random 24-byte nonces, HKDF-SHA256 domain-separated keys, HMAC-SHA256 sibling tokens, and X25519 device envelopes. A random 32-byte vault master key is independent of Supabase Auth credentials. Authenticated context binds protocol/crypto versions, vault, entry, object, purpose, key version, and chunk position/termination. Corrupted or misplaced ciphertext fails closed. Objects are verified by ciphertext hash and length, then stored under an immutable final key before any revision may reference them.
+
+The recovery key has 256 random bits and a checksum. Verify it before syncing a newly created vault. Device pairing requires comparing the public key supplied directly by the requesting device; do not approve a substituted server key. Pairing expires after ten minutes and is single use. Revocation blocks the registered Auth session's future requests, including registration under a new client ID. It cannot erase plaintext or keys already copied by a device. A newly authenticated account session can enroll again if it possesses an encryption key; account compromise and key compromise require separate responses. Key rotation is not implemented in crypto version 1.
+
+The plugin stores credentials and keys in Obsidian SecretStorage. The CLI/daemon currently use a user-only file fallback outside the vault and report that in doctor. Local vault files, conflict copies, caches, pending payloads, and decrypted agent output are plaintext on enrolled endpoints. E2EE does not protect an unlocked endpoint, malware, malicious plugin code, or lost keys. Do not store recovery secrets in the synced vault.
+
+Private tables enable RLS and have no anonymous/authenticated grants. Only the Edge Function's server credential can invoke the dispatcher, with a verified actor and session. Client bundles and profiles accept only public Supabase keys. API errors/logs avoid plaintext payloads and credentials. The local daemon binds loopback and requires a bearer token; profiles never include that token.
+
+The implementation has regression and local plaintext-audit tests, not an independent security audit. See V2-IMPLEMENTATION.md for unverified release gates.

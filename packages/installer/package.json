@@ -1,0 +1,1 @@
+{"name":"@supasync/installer","version":"0.2.0","private":true,"type":"module","exports":{".":"./src/index.ts"},"dependencies":{"yaml":"2.9.1","qrcode":"1.5.4"},"devDependencies":{"@types/qrcode":"1.5.5"}}

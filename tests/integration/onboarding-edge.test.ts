@@ -4,7 +4,7 @@
  * Those rows are actor-scoped and never appear in another user's listVaults().
  */
 import { describe, expect, it } from "vitest";
-import { PasswordAuth, SupaSyncClient, type SecretStore } from "@supasync/client";
+import { PasswordAuth, SupaSyncClient, VaultKeys, type SecretStore } from "@supasync/client";
 import { ProtocolError } from "@supasync/protocol";
 
 const url = process.env.SUPABASE_URL ?? "http://127.0.0.1:54321";
@@ -38,8 +38,9 @@ describe("plugin onboarding through supasync-api", () => {
 
     const owner = new SupaSyncClient({ url, anonKey: anon, fetch, session: ownerAuth });
     expect((await owner.listVaults()).vaults).toEqual([]);
-    const created = await owner.createVault(`supasync-fixture-${Date.now()}`);
-    expect(created.vault.name).toContain("supasync-fixture");
+    const keys = new VaultKeys(ownerSecrets, url, crypto.randomUUID());
+    const plan = await keys.prepare(crypto.randomUUID(), `supasync-fixture-${Date.now()}`);
+    const created = await owner.rpc<{vault: {id:string;role:string}}>("create_vault", plan);
     expect(created.vault.role).toBe("owner");
     const listed = await owner.listVaults();
     expect(listed.vaults.map((vault) => vault.id)).toContain(created.vault.id);

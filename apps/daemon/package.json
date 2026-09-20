@@ -1,0 +1,1 @@
+{"name":"@supasync/daemon","version":"0.2.0","private":true,"type":"module","dependencies":{"@supasync/installer":"0.2.0","@supasync/sync-core":"0.1.0"}}

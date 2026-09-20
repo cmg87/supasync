@@ -10,7 +10,10 @@ describe("SupaSyncClient headers", () => {
       session: { getAccessToken: async () => "user-jwt-token" },
       fetch: async (_input, init) => {
         captured = new Headers(init?.headers);
-        return new Response(JSON.stringify({ ok: true, data: { vaults: [] } }), { status: 200 });
+        return new Response(
+          JSON.stringify({ ok: true, data: { vaults: [] } }),
+          { status: 200 },
+        );
       },
     });
     await client.listVaults();

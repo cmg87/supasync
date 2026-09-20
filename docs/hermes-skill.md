@@ -1,20 +1,21 @@
----
-name: supasync-hermes
-description: Read and write Obsidian notes that sync through SupaSync. Use when the user asks to list, read, create, update, or rename notes in a SupaSync vault without opening Obsidian.
----
+# Headless / agent usage
 
-# SupaSync Hermes
+Install the same SupaSync CLI as desktop users. Authenticate using hidden password input (`login --email EMAIL`), list vaults, and enroll with `recovery verify --vault ID`. For unattended input, pass the secret through stdin, not shell arguments or environment logs. Credentials use a user-only file fallback. Never give an agent a service-role key or direct database write access.
 
-Do not UPDATE Postgres tables directly. That skips receipts and history. Call the CLI, which uses the same protocol as the plugin.
+All commands below require `--vault ID --dir /absolute/path/to/local-vault`. The directory must already exist. A running daemon owns attached vaults; one-shot CLI sync refuses an active ownership lock.
 
-Credentials live outside the vault, typically `~/.config/supasync/`. Never write the service-role key into a note.
-
-```bash
-node /path/to/supasync/apps/cli/dist/cli.js signup --email you@example.com --password '…'
-node /path/to/supasync/apps/cli/dist/cli.js login --email you@example.com --password '…'
-node /path/to/supasync/apps/cli/dist/cli.js vaults
-node /path/to/supasync/apps/cli/dist/cli.js create-vault --name Notes
-node /path/to/supasync/apps/cli/dist/cli.js sync --dir /path/to/vault --vault <vault-id>
+```text
+sync
+list
+get --path note.md
+history --path note.md
+write --path note.md --file /local/draft.md --base-revision REV
+write --path new.md --file /local/draft.md --base-revision 0
+rename --path note.md --to renamed.md --base-revision REV
+delete --path note.md --base-revision REV
+restore --path note.md --revision OLD_REV --base-revision CURRENT_REV
 ```
 
-If a note changed after it was read, the server returns `BASE_CONFLICT`. Re-read, preserve both versions if needed, and commit a new operation id. Do not resend the old envelope.
+Reads decrypt locally. `list` returns stable entry IDs and current revision IDs. Conditional mutations persist their exact payload before network work, return a receipt, and use exit code 2 for a competing remote revision. `--operation-id UUID` can identify a durable mutation; a pending operation must be retried with `sync`, using its saved ciphertext. Do not reissue modified content under its ID.
+
+Synchronize again to apply accepted remote changes to the local filesystem. Importing existing plaintext folders uses the ordinary initial sync and preserves conflicts; a dedicated v1 server importer is not implemented. Export plaintext only from an enrolled local vault and keep it separate from encrypted server backups. Ordinary SQL/table writes are unsupported because they bypass receipts and history.

@@ -1,9 +1,16 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile, rename, open } from "node:fs/promises";
 import { dirname } from "node:path";
 import { seqZero } from "@supasync/protocol";
-import type { ApplyIntent, LocalStore, ManifestRow, MetaState, OutboxRow } from "@supasync/sync-core";
+import type {
+  ApplyIntent,
+  LocalStore,
+  ManifestRow,
+  MetaState,
+  OutboxRow,
+} from "@supasync/sync-core";
 
 type DiskState = {
+  cache?: Record<string, unknown>;
   meta: MetaState;
   manifest: ManifestRow[];
   outbox: OutboxRow[];
@@ -11,6 +18,17 @@ type DiskState = {
 };
 
 export class FileStore implements LocalStore {
+  async getCache<T>(key: string): Promise<T | null> {
+    return ((await this.load()).cache?.[key] as T) ?? null;
+  }
+  async putCache(key: string, value: unknown): Promise<void> {
+    const state = await this.load();
+    state.cache ??= {};
+    state.cache[key] = value;
+    await this.save(state);
+  }
+  private state?: Promise<DiskState>;
+  private saving: Promise<void> = Promise.resolve();
   constructor(private readonly file: string) {}
 
   async getMeta(): Promise<MetaState> {
@@ -22,11 +40,15 @@ export class FileStore implements LocalStore {
     await this.save(state);
   }
   async getManifest(): Promise<Map<string, ManifestRow>> {
-    return new Map((await this.load()).manifest.map((row) => [row.entryId, row]));
+    return new Map(
+      (await this.load()).manifest.map((row) => [row.entryId, row]),
+    );
   }
   async putManifest(row: ManifestRow): Promise<void> {
     const state = await this.load();
-    state.manifest = state.manifest.filter((item) => item.entryId !== row.entryId);
+    state.manifest = state.manifest.filter(
+      (item) => item.entryId !== row.entryId,
+    );
     state.manifest.push(row);
     await this.save(state);
   }
@@ -40,13 +62,17 @@ export class FileStore implements LocalStore {
   }
   async putOutbox(row: OutboxRow): Promise<void> {
     const state = await this.load();
-    state.outbox = state.outbox.filter((item) => item.operationId !== row.operationId);
+    state.outbox = state.outbox.filter(
+      (item) => item.operationId !== row.operationId,
+    );
     state.outbox.push(row);
     await this.save(state);
   }
   async deleteOutbox(operationId: string): Promise<void> {
     const state = await this.load();
-    state.outbox = state.outbox.filter((item) => item.operationId !== operationId);
+    state.outbox = state.outbox.filter(
+      (item) => item.operationId !== operationId,
+    );
     await this.save(state);
   }
   async putIntent(intent: ApplyIntent): Promise<void> {
@@ -56,7 +82,9 @@ export class FileStore implements LocalStore {
     await this.save(state);
   }
   async getIntent(path: string): Promise<ApplyIntent | null> {
-    return (await this.load()).intents.find((item) => item.path === path) ?? null;
+    return (
+      (await this.load()).intents.find((item) => item.path === path) ?? null
+    );
   }
   async deleteIntent(path: string): Promise<void> {
     const state = await this.load();
@@ -67,10 +95,14 @@ export class FileStore implements LocalStore {
     return (await this.load()).intents;
   }
 
-  private async load(): Promise<DiskState> {
+  private load(): Promise<DiskState> {
+    return (this.state ??= this.readDisk());
+  }
+  private async readDisk(): Promise<DiskState> {
     try {
       return JSON.parse(await readFile(this.file, "utf8")) as DiskState;
-    } catch {
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       return {
         meta: {
           installationId: crypto.randomUUID(),
@@ -90,10 +122,30 @@ export class FileStore implements LocalStore {
     }
   }
 
-  private async save(state: DiskState): Promise<void> {
+  private save(state: DiskState): Promise<void> {
+    const bytes = JSON.stringify(state);
+    const work = this.saving.then(() => this.writeDisk(bytes));
+    this.saving = work; // A durability failure blocks later writes until the store is reopened.
+    return work;
+  }
+  private async writeDisk(bytes: string): Promise<void> {
     await mkdir(dirname(this.file), { recursive: true });
     const tmp = `${this.file}.tmp`;
-    await writeFile(tmp, JSON.stringify(state, null, 2));
-    await writeFile(this.file, JSON.stringify(state, null, 2));
+    const handle = await open(tmp, "w", 0o600);
+    try {
+      await handle.writeFile(bytes);
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await rename(tmp, this.file);
+    if (process.platform !== "win32") {
+      const dir = await open(dirname(this.file), "r");
+      try {
+        await dir.sync();
+      } finally {
+        await dir.close();
+      }
+    }
   }
 }

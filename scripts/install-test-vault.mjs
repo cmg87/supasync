@@ -31,7 +31,7 @@ try {
   const plugin = join(vault, ".obsidian", "plugins", "supasync");
   await mkdir(plugin, { recursive: true });
   for (const file of ["main.js", "manifest.json", "styles.css", "versions.json"]) {
-    await copyFile(join(root, "apps", "obsidian", file), join(plugin, file));
+    await copyFile(join(root, "dist", "obsidian", file), join(plugin, file));
   }
   await writeFile(join(plugin, "data.json"), JSON.stringify({
     supabaseUrl: url.origin, anonKey, email: "", vaultId: "", deviceLabel: "Local Obsidian",

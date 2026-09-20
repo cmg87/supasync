@@ -32,3 +32,9 @@ test-vaults/
 .obsidian/
 apps/obsidian/main.js
 apps/obsidian/main.js.map
+
+# Generated npm package documentation
+apps/cli/README.md
+apps/cli/LICENSE
+apps/cli/THIRD_PARTY_NOTICES.md
+apps/cli/docs/

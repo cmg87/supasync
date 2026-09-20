@@ -1,20 +1,28 @@
-# Recovery
+# Recovery and backups
 
-## Client
+An Auth password and an encryption recovery key are different secrets. Losing every enrolled device and the recovery key makes encrypted server data unrecoverable. Save the recovery key independently and verify it once during vault creation. The setup QR is public connection information; it cannot unlock content.
 
-If IndexedDB/local state is missing, corrupt, or from another `server_epoch`, the engine enters bootstrap. Readable vault files are preserved. Missing metadata is never treated as “delete everything remotely.”
+To enroll a CLI/daemon installation, sign in, run `supasync vault list`, then `supasync recovery verify --vault ID`. The key is read through hidden input. The plugin supports the same recovery flow and image-based QR import. Alternatively, create a device pairing request, approve its exact public key from an unlocked device, then finish enrollment on the requesting device within ten minutes.
 
-Copied plugin settings must not reuse another installation's client generation. The installation id lives in local state, not in `data.json`.
+## Server backup
 
-Expired replay cursors return `CURSOR_EXPIRED`. Rebuild from a snapshot while keeping local work.
+```bash
+supasync backup create --file /private/backups/supasync-2026-09-19
+supasync backup verify --file /private/backups/supasync-2026-09-19
+```
 
-## Server
+The destination must be empty. The archive contains Auth, Storage and v2 database data plus Storage bytes, backend version, protocol/crypto version and SHA-256 checksums. These files contain sensitive account metadata and password hashes, even though note contents are encrypted. It never includes local plaintext vault files or local decryption keys.
 
-Restoring a database backup does not by itself rotate `server_epoch`. After a restore:
+Postgres is exported from one consistent snapshot, then Storage is copied. Ready objects are immutable and retained, so the later copy contains at least the objects referenced by that snapshot. This depends on the current no-GC retention policy. `backup verify` verifies archive byte integrity, not recoverability. Keep your recovery key separately and test restoration.
 
-1. Confirm object-store backups match the restored blob locations.
-2. `update supasync.vaults set server_epoch = gen_random_uuid();`
-3. Force every client to reconcile (they will see `EPOCH_MISMATCH`).
-4. A client cursor ahead of `head_seq` is also a rollback signal.
+To restore, first create a **separate empty installation** with another SUPASYNC_HOME and unused port, using the same pinned backend release. Then:
 
-Retention default: 30-day replay horizon, current heads kept, at least 20 versions per entry when present. The floor only advances contiguously. Blobs are not collected while a head, retained revision, snapshot, or active finalizer references them.
+```bash
+SUPASYNC_HOME=/private/restore-test supasync restore --backup /private/backups/supasync-2026-09-19 --empty-target
+```
+
+Restore refuses targets containing Auth users, vaults or Storage objects. It stops the API writers, imports data and Storage bytes, then restarts services. On failure it leaves writers stopped for inspection. Sign in, enroll with your recovery key and verify representative notes, attachments and history before switching devices. Do not point this command at an existing personal installation.
+
+## V1 cutover
+
+The v1 baseline is tagged `supasync-v1-baseline-20260919`. Back up its database and local plaintext vault independently. Use a separate v2 installation and a copy of the plaintext vault to create an encrypted vault. Compare local file counts and hashes after a second-device pull. Keep the v1 backup until verification is complete. There is no automatic destructive reset or dedicated server-side v1 importer.

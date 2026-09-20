@@ -1,25 +1,30 @@
 # Deployment
 
-1. Create a dedicated Supabase project. Do not reuse an unrelated production project.
-2. `supabase link` then `supabase db push` to apply `supabase/migrations`.
-3. Deploy functions:
+Build and install the tarball as described in the README. Normal local setup uses the official `self-hosted/v0.8.1` Supabase release, resolved commit `8c7a4d9dbbaf8b552893822e89d7bf06f33f9220`. Service image versions come from that pinned Compose file. Each installation has a separate Docker project derived from its backend directory. Only the existing Supabase gateway is published, on `127.0.0.1`; Studio, Postgres and the pooler are not separately exposed.
 
 ```bash
-supabase functions deploy supasync-api
-supabase functions deploy supasync-maintenance
+supasync setup --mode local --port 8000 --dry-run
+supasync setup --mode local --port 8000 --yes
+supasync doctor
+supasync backend status
 ```
 
-4. Set backend secrets (`R2_*` only if using R2). Never ship those secrets in the plugin.
-5. Install plugin assets into `.obsidian/plugins/supasync/`.
-6. In the plugin, enter the project URL and publishable/anon key, then **Create account** or **Sign in**. The plugin creates or selects the remote vault by name. Do not create Auth users in Studio, and do not paste vault UUIDs.
-7. Run **Sync now** once if you want an immediate round-trip.
+Setup discovers dependencies, prepares private backend configuration, starts persistent containers, installs schema/functions, checks health, and exports a public profile. `--vault-path` additionally installs the plugin into that explicitly selected vault. Repeating setup preserves generated credentials and installation identity. Failure leaves completed task records for diagnosis/retry. No setup path runs a database reset or deletes volumes.
 
-The CLI remains available for Hermes/headless use (`signup`, `login`, `vaults`, `create-vault`, `sync`). It is not required to onboard a normal Obsidian user.
+For private second-device access, install Tailscale and sign in on the host first, then use `--mode local-tailnet` in a new installation. Setup calls Tailscale Serve to publish the gateway over tailnet HTTPS, never Funnel. Sign in to Tailscale on the second device and scan the connection profile. Private HTTPS, mobile and host-reboot behavior require the manual tests in TESTING.md.
 
-## Local backend
+Existing/managed Supabase must already have the v2 schema and `supasync-api` deployed by its operator. Use the SQL under `supabase/migrations` and deploy `supabase/functions/supasync-api`. The function validates the user's JWT with Auth and is the only caller of the private dispatcher. Configure its server-side Supabase URL and service-role key; never put that key into a profile or plugin. The dispatcher is unavailable to `anon` and `authenticated`. Then connect with:
 
 ```bash
-npm run dev:backend
+supasync setup --mode existing --url https://your-backend --anon-key PUBLIC_KEY
 ```
 
-That starts the local Supabase stack and `supabase functions serve`. The plugin talks to `http://127.0.0.1:54321` with the local publishable/anon key printed by `supabase start`. Configure mobile devices with a LAN or tunnel hostname, not `localhost`.
+## Developer stack
+
+For a **fresh project-local test stack**, run `npm run dev:backend`; this starts the Supabase CLI development stack and serves functions. Apply the v2 migration using the local Supabase migration workflow. Do not reset an existing database to hide migration or encryption failures. The v1 migration chain is preserved in Git at `supasync-v1-baseline-20260919`; fresh v2 installs do not create plaintext v1 tables. Existing v1 operators must back up and choose an explicit cutover. V2 retires the old dispatcher but does not erase old data.
+
+## Updates and removal
+
+`supasync backend update --dry-run` reports the installed and supported pinned release. Cross-release automated backend upgrades are not implemented yet; the command refuses an unsupported change. Make and verify a backup before an operator-managed upgrade. Plugin updates use `supasync plugin update --vault-path PATH` and preserve settings.
+
+`supasync backend down` stops/removes containers while retaining persistent volumes. `supasync service uninstall` removes the per-user service, retaining local data and keys. Never delete the installation directory as an update procedure.
