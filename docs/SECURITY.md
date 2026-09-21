@@ -1,13 +1,15 @@
-# Security model
+# Security
 
-Protocol 2 encrypts Markdown, attachments, basenames and vault labels before upload. The backend sees account identity, opaque vault/entry/object/device IDs, parent-child topology, entry kinds, ciphertext lengths, timing, journal order and opaque sibling-name equality tokens. It cannot perform plaintext search, merge, or content deduplication.
+The server is trusted with plaintext vault names, filenames, text, history, and attachments. There is no application-level E2EE. Host/storage/backup encryption is an independent operator concern.
 
-Cryptography uses pinned noble implementations: XChaCha20-Poly1305 authenticated encryption with random 24-byte nonces, HKDF-SHA256 domain-separated keys, HMAC-SHA256 sibling tokens, and X25519 device envelopes. A random 32-byte vault master key is independent of Supabase Auth credentials. Authenticated context binds protocol/crypto versions, vault, entry, object, purpose, key version, and chunk position/termination. Corrupted or misplaced ciphertext fails closed. Objects are verified by ciphertext hash and length, then stored under an immutable final key before any revision may reference them.
+Obsidian uses atomic text updates. Binary replacement has no equivalent public Obsidian API, so the previous file is retained in vault-local trash before creating the new version. Remote deletes also use trash and never recursively remove untracked local descendants.
 
-The recovery key has 256 random bits and a checksum. Verify it before syncing a newly created vault. Device pairing requires comparing the public key supplied directly by the requesting device; do not approve a substituted server key. Pairing expires after ten minutes and is single use. Revocation blocks the registered Auth session's future requests, including registration under a new client ID. It cannot erase plaintext or keys already copied by a device. A newly authenticated account session can enroll again if it possesses an encryption key; account compromise and key compromise require separate responses. Key rotation is not implemented in crypto version 1.
+Obsidian receives a public Supabase key and an ordinary session for the configured admin Auth UID. RLS and guarded functions enforce this single administrator. Public signup is disabled. Tokens are held in Obsidian SecretStorage; plugin data.json contains connection configuration only.
 
-The plugin stores credentials and keys in Obsidian SecretStorage. The CLI/daemon currently use a user-only file fallback outside the vault and report that in doctor. Local vault files, conflict copies, caches, pending payloads, and decrypted agent output are plaintext on enrolled endpoints. E2EE does not protect an unlocked endpoint, malware, malicious plugin code, or lost keys. Do not store recovery secrets in the synced vault.
+Hermes uses a dedicated PostgreSQL login with application read/write/function permissions. It has no superuser, role creation, schema ownership, bypass-RLS, trigger alteration, or history-editing rights. Runtime SQL writes still require an exact base and operation identity. Installer/backend server credentials remain outside the vault in user-only installation files.
 
-Private tables enable RLS and have no anonymous/authenticated grants. Only the Edge Function's server credential can invoke the dispatcher, with a verified actor and session. Client bundles and profiles accept only public Supabase keys. API errors/logs avoid plaintext payloads and credentials. The local daemon binds loopback and requires a bearer token; profiles never include that token.
+Use HTTPS for network-accessible plugin endpoints. HTTP is allowed only on loopback. Hermes uses TLS with CA/hostname verification; the default exposed DB port is loopback-only. Never disable certificate validation to reach a remote host.
 
-The implementation has regression and local plaintext-audit tests, not an independent security audit. See V2-IMPLEMENTATION.md for unverified release gates.
+Binary uploads go to staging. Finalization verifies the downloaded bytes and stores those same bytes under an immutable final key. Canonical revisions cannot reference an unready or cross-vault blob. Public clients cannot overwrite final objects. Short-lived capability tokens authorize only one reserved binary object.
+
+History, receipts, and referenced objects are retained. Backups contain sensitive plaintext and Auth data. Restrict access to backups and verify restoration in an isolated installation.

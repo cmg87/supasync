@@ -43,27 +43,23 @@ export {
 } from "./path/canonicalize.ts";
 export { PATH_CANON_FIXTURES, type PathFixture } from "./path/fixtures.ts";
 export { assertEnvelope, createEnvelope, envelopeDigest } from "./envelope.ts";
-export { prepareMarkdownBody, requireBlobPath, requireMarkdownPath } from "./text.ts";
+export {
+  prepareMarkdownBody,
+  requireBlobPath,
+  requireMarkdownPath,
+} from "./text.ts";
 export type {
-  ApiOperation,
-  BlobState,
   Capabilities,
-  ClientBinding,
   CommitEnvelope,
   CommitOutcomeKind,
   CommitResult,
   EntryKind,
-  MemberRole,
-  MemberStatus,
   MutationType,
   PullPage,
   RevisionRecord,
-  SignedTransfer,
   SnapshotBegin,
   SnapshotItem,
-  StorageBackendInfo,
-  StorageProvider,
   TextBody,
   VaultInfo,
 } from "./types.ts";
-export * from './v2.ts';
+export { encode, unencode } from "./bytes.ts";

@@ -1,21 +1,44 @@
-# Headless / agent usage
+# Hermes: direct PostgreSQL
 
-Install the same SupaSync CLI as desktop users. Authenticate using hidden password input (`login --email EMAIL`), list vaults, and enroll with `recovery verify --vault ID`. For unattended input, pass the secret through stdin, not shell arguments or environment logs. Credentials use a user-only file fallback. Never give an agent a service-role key or direct database write access.
+Hermes is trusted infrastructure, not a SupaSync user. Obtain the dedicated connection with `supasync hermes connection` and store it securely. The CLI uses the generated CA and verifies TLS. For another host, set `SUPASYNC_DATABASE_URL` and `SUPASYNC_DATABASE_CA` (a certificate file). The default database port binds to loopback; use an SSH tunnel or an explicitly secured private PostgreSQL listener for remote access.
 
-All commands below require `--vault ID --dir /absolute/path/to/local-vault`. The directory must already exist. A running daemon owns attached vaults; one-shot CLI sync refuses an active ownership lock.
+No Supabase Auth login, JWT, service-role key, enrollment, daemon, or running Obsidian process is required.
 
-```text
-sync
-list
-get --path note.md
-history --path note.md
-write --path note.md --file /local/draft.md --base-revision REV
-write --path new.md --file /local/draft.md --base-revision 0
-rename --path note.md --to renamed.md --base-revision REV
-delete --path note.md --base-revision REV
-restore --path note.md --revision OLD_REV --base-revision CURRENT_REV
+```sql
+SELECT id, name FROM supasync.vaults;
+SELECT id, path, content, revision FROM supasync.files
+WHERE vault_id = :'vault_id' AND NOT deleted AND kind = 'text';
+SELECT id, path, content FROM supasync.search(:'vault_id', 'meeting notes');
+SELECT revision, state FROM supasync.revisions
+WHERE file_id = :'file_id' ORDER BY seq;
 ```
 
-Reads decrypt locally. `list` returns stable entry IDs and current revision IDs. Conditional mutations persist their exact payload before network work, return a receipt, and use exit code 2 for a competing remote revision. `--operation-id UUID` can identify a durable mutation; a pending operation must be retried with `sync`, using its saved ciphertext. Do not reissue modified content under its ID.
+Use bound parameters in application code. A write declares the exact revision read:
 
-Synchronize again to apply accepted remote changes to the local filesystem. Importing existing plaintext folders uses the ordinary initial sync and preserves conflicts; a dedicated v1 server importer is not implemented. Export plaintext only from an enrolled local vault and keep it separate from encrypted server backups. Ordinary SQL/table writes are unsupported because they bypass receipts and history.
+```sql
+SELECT supasync.mutate(jsonb_build_object(
+  'protocolVersion', 3,
+  'serverEpoch', supasync.capabilities()->>'serverEpoch',
+  'vaultId', :'vault_id', 'entryId', :'file_id',
+  'clientId', 'hermes', 'operationId', :'operation_id',
+  'type', 'update', 'baseRevisionId', :'revision',
+  'payload', jsonb_build_object('text', :'new_content')
+));
+```
+
+Persist the operation UUID and complete payload before sending, and inspect the returned outcome. Reuse the identical request to resolve a lost response. Never fetch a newer revision and blindly resubmit an older edit. Resolve the conflict first.
+
+Guarded direct table edits are also supported:
+
+```sql
+BEGIN;
+SELECT supasync.prepare_mutation(:'complete_request'::jsonb);
+-- Continue ONLY for outcome=ready. A replay/conflict is already a result.
+UPDATE supasync.files SET content = :'new_content' WHERE id = :'file_id';
+SELECT result FROM supasync.mutation_receipts WHERE operation_id = :'operation_id';
+COMMIT;
+```
+
+Use the helper for tree operations. Delete through a mutation/tombstone, never physical DELETE. Do not update revisions, receipts, hashes, counters, or Supabase Storage metadata.
+
+CLI writes accept `--base-revision` and `--operation-id`; pending requests survive process loss outside the vault. `supasync retry` replays saved requests. A conflict exits with status 2 and saves its outcome. `write --binary` uploads through a blob-scoped capability obtained over SQL; `SUPASYNC_URL`/`SUPASYNC_PUBLIC_KEY` provide the public binary endpoint when setup configuration is absent. The DB role never receives a service-role key.

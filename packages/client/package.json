@@ -7,7 +7,6 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@supasync/protocol": "0.1.0",
-    "@supasync/crypto": "0.2.0"
+    "@supasync/protocol": "0.1.0"
   }
 }

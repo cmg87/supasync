@@ -1,150 +1,139 @@
-import { join, resolve } from "node:path";
-import { realpath, mkdir, open, unlink, readFile } from "node:fs/promises";
-import { createHash } from "node:crypto";
+import pg from "pg";
+import { join } from "node:path";
+import { readFile, readdir, unlink } from "node:fs/promises";
+import { atomicJson, dataHome, readJson } from "@supasync/installer";
 import {
-  PasswordAuth,
-  SupaSyncClient,
-  VaultKeys,
-  type SecretStore,
-} from "@supasync/client";
-import { EncryptedSyncApi, SyncEngine } from "@supasync/sync-core";
-import { atomicJson, readJson, dataHome } from "@supasync/installer";
-import { FileStore } from "./file-store.ts";
-import { NodeVault } from "./node-vault.ts";
-export type RuntimeConfig = {
-  url: string;
-  anonKey: string;
-  installationId?: string;
-  vaultId?: string;
-};
-export class FileSecrets implements SecretStore {
-  private file(id: string) {
-    if (!/^[a-z0-9-]{1,120}$/.test(id)) throw new Error("Invalid secret ID");
-    return join(dataHome(), "secrets", `${id}.json`);
-  }
-  async get(id: string) {
-    return (await readJson<{ value: string }>(this.file(id)))?.value ?? null;
-  }
-  async set(id: string, value: string) {
-    await atomicJson(this.file(id), { value });
-  }
-  async delete(id: string) {
-    await unlink(this.file(id)).catch((e) => {
-      if (e.code !== "ENOENT") throw e;
-    });
-  }
-}
-export async function runtime() {
-  const config = await readJson<RuntimeConfig>(join(dataHome(), "config.json"));
-  if (!config?.url || !config.anonKey)
-    throw new Error("Run supasync setup first");
-  config.installationId ??= crypto.randomUUID();
-  await atomicJson(join(dataHome(), "config.json"), config);
-  const secrets = new FileSecrets();
-  const auth = new PasswordAuth(config.url, config.anonKey, fetch, secrets);
-  const client = new SupaSyncClient({
-    url: config.url,
-    anonKey: config.anonKey,
-    fetch,
-    session: auth,
+  digestCanonical,
+  hashBytes,
+  unencode,
+  type CommitEnvelope,
+  type CommitResult,
+} from "@supasync/protocol";
+
+export async function database() {
+  const saved = await readJson<{ connectionString: string; ca?: string }>(
+    join(dataHome(), "hermes.json"),
+  );
+  const value = process.env.SUPASYNC_DATABASE_URL ?? saved?.connectionString;
+  if (!value)
+    throw new Error("Set SUPASYNC_DATABASE_URL or run supasync setup");
+  const u = new URL(value);
+  if (!["postgres:", "postgresql:"].includes(u.protocol))
+    throw new Error("Invalid PostgreSQL connection string");
+  const ca = process.env.SUPASYNC_DATABASE_CA
+    ? await readFile(process.env.SUPASYNC_DATABASE_CA, "utf8")
+    : saved?.ca;
+  const client = new pg.Client({
+    host: u.hostname,
+    port: Number(u.port || 5432),
+    database: u.pathname.slice(1) || "postgres",
+    user: decodeURIComponent(u.username),
+    password: decodeURIComponent(u.password),
+    ssl: { rejectUnauthorized: true, ...(ca ? { ca } : {}) },
   });
-  const keys = new VaultKeys(secrets, config.url, config.installationId);
-  return { config, secrets, auth, client, keys };
+  await client.connect();
+  const result = await client.query(
+    "select supasync.capabilities() as capabilities",
+  );
+  return {
+    client,
+    capabilities: result.rows[0].capabilities,
+    close: () => client.end(),
+  };
 }
-export async function vaultIdentity(
-  path: string,
-  vaultId: string,
-  endpoint: string,
-) {
-  return createHash("sha256")
-    .update(
-      JSON.stringify([await realpath(path), vaultId, new URL(endpoint).origin]),
-    )
-    .digest("hex");
-}
-export async function acquireVault(
-  path: string,
-  vaultId: string,
-  endpoint: string,
-) {
-  const id = await vaultIdentity(path, vaultId, endpoint);
-  const directory = join(dataHome(), "locks");
-  await mkdir(directory, { recursive: true, mode: 0o700 });
-  const file = join(directory, `${id}.lock`);
-  const token = crypto.randomUUID();
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      const h = await open(file, "wx", 0o600);
-      await h.writeFile(JSON.stringify({ pid: process.pid, token }));
-      await h.close();
-      return async () => {
-        const current = await readJson<{ token: string }>(file);
-        if (current?.token === token) await unlink(file);
-      };
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      const owner = await readJson<{ pid: number }>(file);
-      if (!owner || !Number.isSafeInteger(owner.pid))
-        throw new Error("Vault lock is invalid; inspect before repairing");
-      try {
-        process.kill(owner.pid, 0);
-        throw new Error("Vault is already owned by another sync process");
-      } catch (e) {
-        if ((e as NodeJS.ErrnoException).code === "ESRCH") {
-          await unlink(file);
-          continue;
-        }
-        throw e;
-      }
+export async function durableMutation(
+  client: pg.Client,
+  request: CommitEnvelope,
+): Promise<CommitResult> {
+  if (!/^[a-f0-9-]{36}$/i.test(request.operationId))
+    throw new Error("Invalid operation UUID");
+  const directory = join(dataHome(), "outbox-v3");
+  const file = join(directory, `${request.operationId}.json`);
+  const existing = await readJson<CommitEnvelope>(file);
+  if (
+    existing &&
+    (await digestCanonical(existing)) !== (await digestCanonical(request))
+  )
+    throw new Error("ID_REUSE");
+  await atomicJson(file, request);
+  const wire = structuredClone(request);
+  if (typeof wire.payload.bytes === "string") {
+    const bytes = unencode(wire.payload.bytes),
+      id = request.operationId;
+    const reserved = await client.query(
+      "select supasync.reserve_blob($1,$2,$3,$4) as blob",
+      [id, request.vaultId, await hashBytes(bytes), bytes.length],
+    );
+    const blob = reserved.rows[0].blob;
+    if (!blob.ready) {
+      const transfer = await binaryTransfer("upload", id, blob.token);
+      const response = await fetch(transfer.url, {
+        method: transfer.method,
+        headers: transfer.headers,
+        body: bytes as unknown as BodyInit,
+      });
+      if (!response.ok) throw new Error("Attachment upload failed");
+      await binaryTransfer("finalize", id, blob.token);
     }
+    delete wire.payload.bytes;
+    wire.payload.blob_id = id;
   }
-  throw new Error("Could not acquire vault ownership");
+  const result = await client.query(
+    "select supasync.mutate($1::jsonb) as result",
+    [JSON.stringify(wire)],
+  );
+  // Keep a receipt locally before retiring the pending payload.
+  await atomicJson(
+    join(dataHome(), "receipts-v3", `${request.operationId}.json`),
+    result.rows[0].result,
+  );
+  await unlink(file);
+  return result.rows[0].result;
 }
-export async function openVault(path: string, vaultId: string) {
-  const r = await runtime();
-  const key = await r.keys.get(vaultId);
-  if (!key)
-    throw new Error("Vault is locked; enroll with supasync recovery verify");
-  const release = await acquireVault(path, vaultId, r.config.url);
-  try {
-    const id = await vaultIdentity(path, vaultId, r.config.url);
-    const store = new FileStore(
-      join(dataHome(), "vault-state", id, "state.json"),
-    );
-    const meta = await store.getMeta();
-    meta.vaultId = vaultId;
-    await store.putMeta(meta);
-    await r.client.registerClient({
-      vaultId,
-      clientId: meta.clientId,
-      label: "headless",
-      platform: "node",
-    });
-    const api = new EncryptedSyncApi(
-      r.client,
-      store,
-      vaultId,
-      key,
-      fetch,
-      r.config.url,
-    );
-    const vault = new NodeVault(resolve(path));
-    const engine = new SyncEngine({ api, vault, store, vaultId });
-    return {
-      ...r,
-      api,
-      vault,
-      store,
-      engine,
-      close: async () => {
-        engine.pause();
-        key.fill(0);
-        await release();
+export async function binaryTransfer(
+  action: string,
+  id: string,
+  token: string,
+) {
+  const config = await readJson<{ url: string; anonKey: string }>(
+    join(dataHome(), "config.json"),
+  );
+  const url = process.env.SUPASYNC_URL ?? config?.url;
+  if (!url) throw new Error("Set SUPASYNC_URL for binary transfers");
+  const endpoint = new URL(url);
+  if (
+    endpoint.protocol !== "https:" &&
+    !["localhost", "127.0.0.1"].includes(endpoint.hostname)
+  )
+    throw new Error("HTTPS_REQUIRED");
+  const response = await fetch(
+    `${url.replace(/\/$/, "")}/functions/v1/supasync-binary`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        apikey: process.env.SUPASYNC_PUBLIC_KEY ?? config?.anonKey ?? "",
       },
-    };
-  } catch (e) {
-    key.fill(0);
-    await release();
+      body: JSON.stringify({ action, id, token }),
+    },
+  );
+  if (!response.ok) throw new Error("Binary transfer failed");
+  const result = await response.json();
+  if (result.url?.startsWith("/"))
+    result.url = url.replace(/\/$/, "") + result.url;
+  return result;
+}
+export async function retryPending(client: pg.Client) {
+  const directory = join(dataHome(), "outbox-v3");
+  const files = await readdir(directory).catch((e: NodeJS.ErrnoException) => {
+    if (e.code === "ENOENT") return [];
     throw e;
+  });
+  const results = [];
+  for (const file of files) {
+    if (!/^[a-f0-9-]{36}\.json$/i.test(file)) continue;
+    const request = await readJson<CommitEnvelope>(join(directory, file));
+    if (request) results.push(await durableMutation(client, request));
   }
+  return results;
 }

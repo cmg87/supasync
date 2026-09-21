@@ -4,7 +4,14 @@ import { mkdir, readdir, readFile } from "node:fs/promises";
 import { pipeline } from "node:stream/promises";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
-import { atomicJson, readJson, compose, type InstallState } from "./index.ts";
+import {
+  atomicJson,
+  readJson,
+  compose,
+  databaseSql,
+  waitForHealth,
+  type InstallState,
+} from "./index.ts";
 function docker(state: InstallState, args: string[]) {
   if (!state.composeDir) throw new Error("A self-hosted backend is required");
   const name = `supasync-${createHash("sha256").update(state.composeDir).digest("hex").slice(0, 12)}`;
@@ -67,10 +74,10 @@ export async function createBackup(state: InstallState, directory: string) {
       "--data-only",
       "--schema=auth",
       "--schema=storage",
-      "--schema=supasync_v2",
+      "--schema=supasync",
       "--exclude-table-data=auth.schema_migrations",
       "--exclude-table-data=storage.migrations",
-      "--exclude-table-data=supasync_v2.metadata",
+      "--schema=supasync_private",
       "--no-owner",
       "--no-acl",
     ],
@@ -85,33 +92,24 @@ export async function createBackup(state: InstallState, directory: string) {
     format: 1,
     createdAt: new Date().toISOString(),
     backendRelease: state.release,
-    protocolVersion: 2,
-    cryptoVersion: 1,
+    protocolVersion: 3,
     databaseHash: await digest(join(directory, "database.dump")),
     storageHash: await digest(join(directory, "storage.tar")),
-    recoveryRequired: true,
     retention: "immutable ready objects; no garbage collection",
   });
   return {
     directory,
-    recovery:
-      "Keep your verified recovery key separately. Test restoration in a separate empty installation before relying on this backup.",
+    next: "Test restoration into a separate empty installation.",
   };
 }
 export async function verifyBackup(directory: string) {
   const manifest = await readJson<{
     format: number;
     protocolVersion: number;
-    cryptoVersion: number;
     databaseHash: string;
     storageHash: string;
   }>(join(directory, "manifest.json"));
-  if (
-    !manifest ||
-    manifest.format !== 1 ||
-    manifest.protocolVersion !== 2 ||
-    manifest.cryptoVersion !== 1
-  )
+  if (!manifest || manifest.format !== 1 || manifest.protocolVersion !== 3)
     throw new Error("Unsupported backup");
   for (const [name, hash] of [
     ["database.dump", manifest.databaseHash],
@@ -123,7 +121,7 @@ export async function verifyBackup(directory: string) {
     verified: true,
     scope: "Archive byte integrity",
     restoreTest: "Still required in an isolated installation",
-    recoveryKey: "Required separately",
+    contents: "Plaintext database and private binary objects",
   };
 }
 
@@ -164,7 +162,7 @@ export async function restoreBackup(state: InstallState, directory: string) {
     "postgres",
     "-At",
     "-c",
-    "select (select count(*) from auth.users)+(select count(*) from supasync_v2.vaults)+(select count(*) from storage.objects)",
+    "select (select count(*) from auth.users)+(select count(*) from supasync.vaults)+(select count(*) from storage.objects)",
   ]);
   if (count.trim() !== "0")
     throw new Error(
@@ -180,14 +178,35 @@ export async function restoreBackup(state: InstallState, directory: string) {
   });
   if (!listed.ok) throw new Error("Target Storage API is unavailable");
   const buckets = (await listed.json()) as Array<{ id: string }>;
-  if (buckets.some((b) => b.id === "supasync-ciphertext")) {
+  if (buckets.some((b) => b.id === "supasync-blobs")) {
     const deleted = await fetch(
-      `${state.endpoint}/storage/v1/bucket/supasync-ciphertext`,
+      `${state.endpoint}/storage/v1/bucket/supasync-blobs`,
       { method: "DELETE", headers },
     );
     if (!deleted.ok) throw new Error("Could not remove the empty seed bucket");
   }
-  await compose(state, ["stop", "functions", "auth", "rest", "storage"]);
+  // Stop the gateway too: no requests may enter during restore, and its upstream
+  // DNS/connection state must be rebuilt when the stopped services reconnect.
+  await compose(state, [
+    "stop",
+    "api-gw",
+    "functions",
+    "auth",
+    "rest",
+    "storage",
+  ]);
+  await compose(state, [
+    "exec",
+    "-T",
+    "db",
+    "psql",
+    "-U",
+    "postgres",
+    "-d",
+    "postgres",
+    "-c",
+    "delete from supasync.settings",
+  ]);
   await importFile(
     state,
     [
@@ -224,9 +243,14 @@ export async function restoreBackup(state: InstallState, directory: string) {
     ],
     join(directory, "storage.tar"),
   );
+  await databaseSql(
+    state,
+    "update supasync.settings set epoch=gen_random_uuid() where id;",
+  );
   await compose(state, ["up", "-d", "--wait"]);
+  await waitForHealth(state);
   return {
     restored: true,
-    next: "Sign in and enroll with your separately stored recovery key. Verify notes and attachments before switching devices.",
+    next: "Sign in with the restored admin account. Verify notes and attachments before switching devices.",
   };
 }

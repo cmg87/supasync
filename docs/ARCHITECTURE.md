@@ -1,15 +1,18 @@
 # Architecture
 
-The v2 specification is `SupaSync-v2-E2EE-Local-First-Architecture.md`. The earlier architecture/build plan describes the v1 baseline and is historical.
+SupaSync is one trusted installation with multiple named vaults, one Obsidian Auth administrator, and a trusted PostgreSQL role for Hermes. Vaults have no owners, members, invitations, or device access grants.
 
-- `packages/protocol`: browser-compatible paths, local models and ciphertext-only wire types.
-- `packages/crypto`: authenticated encryption, key derivation, name tokens, recovery and device envelopes.
-- `packages/client`: Auth, public-key checks, authenticated RPC transport and secret-store key lifecycle.
-- `packages/sync-core`: durable queue, reconciliation, conflict preservation, snapshots and the encryption boundary. Its internal plaintext records never go directly to the v2 server.
-- `apps/obsidian`: public Obsidian APIs, IndexedDB durability, SecretStorage, QR/recovery/pairing and optional loopback daemon delegation.
-- `apps/cli`: bundled npm commands, filesystem adapter, exact-base headless operations and persistent state outside the vault.
-- `apps/daemon`: foreground/background engine with per-vault locks, watchers plus periodic scans and authenticated loopback control.
-- `packages/installer`: pinned official Docker deployment, profiles, plugin installation, service definitions and backup tools.
-- `supabase`: private transactional schema, authenticated Edge API and Supabase Storage ciphertext bucket.
+- `protocol`: browser-compatible paths, exact-byte hashes, mutation envelopes, decimal sequence values, and shared types.
+- `sync-core`: reconciliation, persistent payload queues, conflict copies, apply intents, snapshots, and separate received/applied cursors. No filesystem or Obsidian imports.
+- `client`: public-key validation, session lifecycle, PostgREST calls, and binary transfer requests.
+- Obsidian: public vault/request APIs, IndexedDB durability, SecretStorage sessions, and a small settings screen.
+- CLI: setup and administration plus direct PostgreSQL operations with a durable mutation outbox. No daemon or local mirror is required.
+- Installer: pinned official Supabase Compose distribution, resumable provisioning, plugin configuration, TLS credentials, backup/restore.
 
-The daemon is optional. It runs client-side reconciliation and encryption, not server authorization. Edge Functions validate sessions, gate ciphertext operations and invoke transactions; they never receive vault keys. Supabase Storage is the only storage API used by SupaSync.
+Canonical `supasync.files` rows contain text or a reference to a verified immutable binary. `revisions` stores full historical states and is the journal. `changes` is a security-invoker projection, not a second journal. `mutation_receipts` guarantees identical retries. `settings` holds the one admin UID, protocol, installation epoch, and committed head. `blobs` and private transfer capabilities protect Storage finalization.
+
+A transaction-scoped installation lock precedes row locks and journal allocation. Triggers validate prepared mutations and atomically maintain file state, hashes, history, and receipts. Raw guarded SQL and PostgREST mutations use the same behavior. Application roles cannot modify the journal or disable triggers.
+
+Snapshots select the latest immutable state per file at a fixed journal ceiling. They need no persistent snapshot tables. History and blobs are retained indefinitely; automatic garbage collection is deliberately absent.
+
+Only binary transfers use an Edge Function: it signs staging uploads, verifies bytes, writes immutable final objects, and marks them ready. Plaintext note synchronization goes directly through PostgREST. Hermes obtains blob-scoped capabilities through its DB connection without an Auth session.

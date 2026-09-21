@@ -1,6 +1,6 @@
 # SupaSync agent notes
 
-This repository implements the specification in `SupaSync-Architecture-and-Build-Plan.md`. Do not replace requested v1 capabilities with TODOs. Do not touch production Supabase projects or a user's real vault. Keep credentials out of source and release assets.
+This repository implements the single-owner plaintext design in `docs/ARCHITECTURE.md` and protocol 3 in `docs/PROTOCOL.md`. The root v1/v2 plans are historical. Do not replace requested capabilities with TODOs. Do not touch production Supabase projects or a user's real vault. Keep credentials out of source and release assets.
 
 ## Non-negotiable invariants
 
@@ -15,17 +15,17 @@ This repository implements the specification in `SupaSync-Architecture-and-Build
 9. A file revision can reference only an authorized, verified, ready blob.
 10. Fetching a journal page is not proof that local changes are durable. Keep `received_cursor` distinct from `applied_cursor`.
 11. Device clocks and filesystem mtimes are display/scan hints, not sync authority.
-12. Hermes, import tools, and the plugin use the same protocol. Ordinary table updates that skip receipts/history are forbidden.
+12. Hermes uses direct PostgreSQL. Guarded table writes and plugin RPCs use the same trigger-enforced mutation contract; writes that skip receipts/history are forbidden.
 
 ## Package boundaries
 
 - `packages/protocol`: schemas, errors, path canonicalization, hashes, envelopes. Browser-compatible. No Node or Obsidian imports.
 - `packages/sync-core`: bootstrap, pull/push, reconciliation, conflicts, retries, recovery. No Obsidian or Node filesystem imports.
-- `packages/client`: authenticated API client for plugin, CLI, and tests.
+- `packages/client`: public-key authenticated PostgREST/Storage client for the plugin and tests.
 - `apps/obsidian`: public Obsidian APIs only. `isDesktopOnly: false`. No Node `fs`/`path`/`crypto`/`child_process` at runtime.
-- `apps/cli`: Node filesystem adapter for Hermes and automation.
+- `apps/cli`: setup/administration and direct PostgreSQL operations for Hermes. No Auth login or daemon requirement.
 - `supabase`: migrations, RPCs, Edge Functions, pgTAP tests.
 
 ## Implementation stages
 
-See `CHECKLIST.md`. Work in project-local Supabase. When a real device or R2 credential is unavailable, deliver code plus a reproducible procedure and mark the target unverified. Do not fabricate passing tests.
+See `CHECKLIST.md`. Work only in disposable or explicitly selected development backends. Production setup never seeds fixtures. When a real device is unavailable, deliver code plus a reproducible procedure and mark the target unverified. Do not fabricate passing tests.

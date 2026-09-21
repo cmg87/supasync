@@ -7,7 +7,7 @@ export function syncStoreId(input: {
   vaultId: string;
 }): string {
   const backend = backendKeyFromUrl(input.backendUrl);
-  return `${PLUGIN_ID}-${input.installationId}-${backend}-${input.vaultId}`;
+  return `${PLUGIN_ID}-v3-${input.installationId}-${backend}-${input.vaultId}`;
 }
 
 export function newInstallationId(): string {
@@ -15,7 +15,10 @@ export function newInstallationId(): string {
 }
 
 /** Obsidian SecretStorage accepts only lowercase letters, digits and dashes, up to 64 characters. */
-export async function installationSessionSecretId(backendUrl: string, installationId: string): Promise<string> {
+export async function installationSessionSecretId(
+  backendUrl: string,
+  installationId: string,
+): Promise<string> {
   const backend = new URL(backendUrl).href.replace(/\/$/, "");
   const digest = await digestCanonical([backend, installationId]);
   // Keep 220 bits of the digest; do not truncate the backend or installation inputs.

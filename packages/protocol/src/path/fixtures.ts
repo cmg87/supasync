@@ -8,6 +8,20 @@ export type PathFixture = {
 
 export const PATH_CANON_FIXTURES: PathFixture[] = [
   {
+    name: "dotted capital I",
+    input: "İ.md",
+    expect: "ok",
+    display: "İ.md",
+    pathKey: "i\u0307.md",
+  },
+  {
+    name: "Greek final sigma",
+    input: "ΟΣ.md",
+    expect: "ok",
+    display: "ΟΣ.md",
+    pathKey: "οσ.md",
+  },
+  {
     name: "composed accent",
     input: "caf\u00e9/note.md",
     expect: "ok",

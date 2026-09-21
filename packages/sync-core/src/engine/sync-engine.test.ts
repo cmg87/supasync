@@ -4,9 +4,22 @@ import { MemoryStore } from "../persist/memory-store.ts";
 import { MemoryVault } from "../adapters/memory-vault.ts";
 import { SyncEngine } from "./sync-engine.ts";
 
-async function client(label: string, backend: MemoryBackend, vault: MemoryVault) {
-  const store = new MemoryStore({ label, vaultId: backend.vaultId, serverEpoch: backend.serverEpoch });
-  const engine = new SyncEngine({ api: backend, vault, store, vaultId: backend.vaultId });
+async function client(
+  label: string,
+  backend: MemoryBackend,
+  vault: MemoryVault,
+) {
+  const store = new MemoryStore({
+    label,
+    vaultId: backend.vaultId,
+    serverEpoch: backend.serverEpoch,
+  });
+  const engine = new SyncEngine({
+    api: backend,
+    vault,
+    store,
+    vaultId: backend.vaultId,
+  });
   return { store, vault, engine };
 }
 
@@ -43,11 +56,18 @@ describe("sync engine", () => {
     await a.engine.cycle();
     const aFiles = (await aVault.list()).map((row) => row.path);
     const bFiles = (await bVault.list()).map((row) => row.path);
-    expect(aFiles.some((path) => path.includes("conflict") || path === "note.md")).toBe(true);
-    expect(bFiles.some((path) => path.includes("conflict") || path === "note.md")).toBe(true);
+    expect(
+      aFiles.some((path) => path.includes("conflict") || path === "note.md"),
+    ).toBe(true);
+    expect(
+      bFiles.some((path) => path.includes("conflict") || path === "note.md"),
+    ).toBe(true);
     const aTexts = [];
-    for (const path of aFiles.filter((item) => item.endsWith(".md"))) aTexts.push(await aVault.readText(path));
-    expect(aTexts.some((text) => text.includes("local") || text.includes("remote"))).toBe(true);
+    for (const path of aFiles.filter((item) => item.endsWith(".md")))
+      aTexts.push(await aVault.readText(path));
+    expect(
+      aTexts.some((text) => text.includes("local") || text.includes("remote")),
+    ).toBe(true);
   });
 
   it("retries an identical commit without duplicating revisions", async () => {
@@ -61,37 +81,133 @@ describe("sync engine", () => {
   });
 });
 
-it("does not finalize or commit a blob when its upload fails", async () => {
-  const backend = new MemoryBackend();
-  const vault = new MemoryVault();
-  const store = new MemoryStore({ vaultId: backend.vaultId, serverEpoch: backend.serverEpoch });
-  await vault.writeBytes("attachment.bin", new Uint8Array([1, 2, 3]));
-  vi.spyOn(backend, "beginBlobUpload").mockResolvedValue({
-    blobId: crypto.randomUUID(), stagingKey: "staging", transfer: { url: "https://storage.example.test/upload", method: "PUT", headers: {} },
+it("persists the complete binary payload before attempting a network commit", async () => {
+  const backend = new MemoryBackend(),
+    vault = new MemoryVault(),
+    store = new MemoryStore({ vaultId: backend.vaultId });
+  await vault.writeBytes("attachment.bin", new Uint8Array([0, 255, 3]));
+  vi.spyOn(backend, "commit").mockImplementation(async (envelope) => {
+    const pending = await store.listOutbox();
+    expect(
+      pending.find((x) => x.operationId === envelope.operationId)?.envelope,
+    ).toEqual(envelope);
+    throw new Error("offline");
   });
-  const finalize = vi.spyOn(backend, "finalizeBlob");
-  const transport = vi.fn<typeof fetch>().mockResolvedValue(new Response("unavailable", { status: 503 }));
-  const engine = new SyncEngine({ api: backend, vault, store, vaultId: backend.vaultId, fetch: transport });
-  await expect(engine.cycle()).rejects.toThrow("Attachment upload failed (HTTP 503)");
-  expect(transport).toHaveBeenCalledOnce();
-  expect(finalize).not.toHaveBeenCalled();
-  expect(await vault.readBytes("attachment.bin")).toEqual(new Uint8Array([1, 2, 3]));
+  const engine = new SyncEngine({
+    api: backend,
+    vault,
+    store,
+    vaultId: backend.vaultId,
+  });
+  expect((await engine.cycle()).errors).toContain("offline");
+  expect(await store.listOutbox()).toHaveLength(1);
+  expect(await vault.readBytes("attachment.bin")).toEqual(
+    new Uint8Array([0, 255, 3]),
+  );
 });
 
-it.each([503, 200])("does not write a failed or corrupt attachment download (HTTP %s)", async (status) => {
-  const backend = new MemoryBackend();
-  const source = await client("source", backend, new MemoryVault());
-  await source.vault.writeBytes("attachment.bin", new Uint8Array([1, 2, 3]));
-  await source.engine.cycle();
-  vi.spyOn(backend, "getBlobDownload").mockResolvedValue({
-    transfer: { url: "https://storage.example.test/download", method: "GET", headers: {} },
-    verifiedSha256: "expected-hash", verifiedLength: 3,
+it.each(["offline", "corrupt"])(
+  "never writes a failed binary download: %s",
+  async (mode) => {
+    const backend = new MemoryBackend(),
+      source = await client("source", backend, new MemoryVault());
+    await source.vault.writeBytes(
+      "attachment.bin",
+      new Uint8Array([0, 255, 3]),
+    );
+    await source.engine.cycle();
+    vi.spyOn(backend, "readBlob").mockImplementation(async () => {
+      if (mode === "offline") throw new Error("offline");
+      return new Uint8Array([9, 9, 9]);
+    });
+    const target = await client("target", backend, new MemoryVault());
+    await expect(target.engine.cycle()).rejects.toThrow(
+      mode === "offline" ? "offline" : "HASH_MISMATCH",
+    );
+    expect(await target.vault.exists("attachment.bin")).toBe(false);
+    expect((await target.store.getMeta()).appliedCursor).toBe("0");
+  },
+);
+
+it("does not infer deletion from an incomplete non-empty scan", async () => {
+  const backend = new MemoryBackend(),
+    a = await client("a", backend, new MemoryVault());
+  await a.vault.writeText("a.md", "a");
+  await a.vault.writeText("b.md", "b");
+  await a.engine.cycle();
+  await a.vault.remove("a.md");
+  await a.engine.cycle();
+  const b = await client("b", backend, new MemoryVault());
+  await b.engine.cycle();
+  expect(await b.vault.readText("a.md")).toBe("a");
+});
+
+it("keeps a local edit made while its earlier mutation is in flight", async () => {
+  const backend = new MemoryBackend(),
+    a = await client("a", backend, new MemoryVault());
+  await a.vault.writeText("a.md", "base");
+  await a.engine.cycle();
+  await a.vault.writeText("a.md", "first");
+  const commit = backend.commit.bind(backend);
+  let once = true;
+  vi.spyOn(backend, "commit").mockImplementation(async (request) => {
+    const result = await commit(request);
+    if (once) {
+      once = false;
+      await a.vault.writeText("a.md", "second");
+    }
+    return result;
   });
-  const target = new MemoryVault();
-  const engine = new SyncEngine({
-    api: backend, vault: target, store: new MemoryStore({ vaultId: backend.vaultId }), vaultId: backend.vaultId,
-    fetch: async () => new Response(new Uint8Array([9, 9, 9]), { status }),
+  await a.engine.cycle();
+  await a.engine.cycle();
+  const b = await client("b", backend, new MemoryVault());
+  await b.engine.cycle();
+  const texts = await Promise.all(
+    (await b.vault.list())
+      .filter((f) => f.kind === "file")
+      .map((f) => b.vault.readText(f.path)),
+  );
+  expect(texts).toContain("second");
+});
+
+it("uses per-file revisions even when other files advance the journal", async () => {
+  const backend = new MemoryBackend(),
+    a = await client("a", backend, new MemoryVault());
+  await a.vault.writeText("a.md", "a");
+  await a.vault.writeText("b.md", "b");
+  await a.engine.cycle();
+  await a.vault.writeText("b.md", "changed");
+  expect((await a.engine.cycle()).errors).toEqual([]);
+  const b = await client("b", backend, new MemoryVault());
+  await b.engine.cycle();
+  expect(await b.vault.readText("b.md")).toBe("changed");
+});
+
+it("preserves text edited while a remote body is downloading", async () => {
+  const backend = new MemoryBackend(),
+    a = await client("a", backend, new MemoryVault()),
+    b = await client("b", backend, new MemoryVault());
+  await a.vault.writeText("a.md", "base");
+  await a.engine.cycle();
+  await b.engine.cycle();
+  await a.vault.writeText("a.md", "remote");
+  await a.engine.cycle();
+  const get = backend.getBodies.bind(backend);
+  let once = true;
+  vi.spyOn(backend, "getBodies").mockImplementation(async (...args) => {
+    const result = await get(...args);
+    if (once) {
+      once = false;
+      await b.vault.writeText("a.md", "late local");
+    }
+    return result;
   });
-  await expect(engine.cycle()).rejects.toThrow(status === 503 ? "Attachment download failed" : "integrity verification");
-  expect(await target.exists("attachment.bin")).toBe(false);
+  await b.engine.cycle();
+  const texts = await Promise.all(
+    (await b.vault.list())
+      .filter((r) => r.kind === "file")
+      .map((r) => b.vault.readText(r.path)),
+  );
+  expect(texts).toContain("late local");
+  expect(texts).toContain("remote");
 });

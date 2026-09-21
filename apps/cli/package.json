@@ -1,11 +1,10 @@
 {
   "name": "supasync",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": false,
   "type": "module",
   "bin": {
-    "supasync": "./dist/cli.js",
-    "supasyncd": "./dist/daemon.js"
+    "supasync": "./dist/cli.js"
   },
   "scripts": {
     "build": "node esbuild.config.mjs",
@@ -24,6 +23,10 @@
     "@supasync/protocol": "0.1.0",
     "@supasync/sync-core": "0.1.0",
     "@supasync/installer": "0.2.0",
-    "@supasync/daemon-client": "0.2.0"
+    "@types/pg": "8.15.5"
+  },
+  "dependencies": {
+    "pg": "8.16.3",
+    "@inquirer/prompts": "7.8.6"
   }
 }

@@ -8,9 +8,6 @@ const MUTATION_TYPES: MutationType[] = [
   "update",
   "delete",
   "rename",
-  "convert_kind",
-  "create_conflict_copy",
-  "resolve_conflict",
   "restore_revision",
 ];
 
@@ -20,35 +17,55 @@ export function assertEnvelope(value: unknown): CommitEnvelope {
   }
   const env = value as Record<string, unknown>;
   const type = env.type;
-  if (typeof type !== "string" || !MUTATION_TYPES.includes(type as MutationType)) {
+  if (
+    typeof type !== "string" ||
+    !MUTATION_TYPES.includes(type as MutationType)
+  ) {
     throw new ProtocolError("UNAVAILABLE", "operation type is invalid");
   }
   if (env.protocolVersion !== PROTOCOL_VERSION) {
-    throw new ProtocolError("PROTOCOL_UPGRADE_REQUIRED", "client protocol is not supported", {
-      protocolVersion: env.protocolVersion,
-    });
+    throw new ProtocolError(
+      "PROTOCOL_UPGRADE_REQUIRED",
+      "client protocol is not supported",
+      {
+        protocolVersion: env.protocolVersion,
+      },
+    );
   }
-  for (const key of ["serverEpoch", "vaultId", "clientId", "operationId"] as const) {
+  for (const key of [
+    "serverEpoch",
+    "vaultId",
+    "clientId",
+    "operationId",
+  ] as const) {
     if (typeof env[key] !== "string" || env[key] === "") {
-      throw new ProtocolError("UNAVAILABLE", `envelope field ${key} is required`);
+      throw new ProtocolError(
+        "UNAVAILABLE",
+        `envelope field ${key} is required`,
+      );
     }
   }
-  if (typeof env.clientGeneration !== "number" || env.clientGeneration < 1) {
-    throw new ProtocolError("CLIENT_GENERATION_EXPIRED", "client generation is invalid");
-  }
-  if (env.payload === null || typeof env.payload !== "object" || Array.isArray(env.payload)) {
-    throw new ProtocolError("UNAVAILABLE", "envelope payload must be an object");
+  if (
+    env.payload === null ||
+    typeof env.payload !== "object" ||
+    Array.isArray(env.payload)
+  ) {
+    throw new ProtocolError(
+      "UNAVAILABLE",
+      "envelope payload must be an object",
+    );
   }
   return env as unknown as CommitEnvelope;
 }
 
-export async function envelopeDigest(envelope: CommitEnvelope): Promise<string> {
+export async function envelopeDigest(
+  envelope: CommitEnvelope,
+): Promise<string> {
   return digestCanonical({
     protocolVersion: envelope.protocolVersion,
     serverEpoch: envelope.serverEpoch,
     vaultId: envelope.vaultId,
     clientId: envelope.clientId,
-    clientGeneration: envelope.clientGeneration,
     operationId: envelope.operationId,
     type: envelope.type,
     entryId: envelope.entryId ?? null,
@@ -57,7 +74,9 @@ export async function envelopeDigest(envelope: CommitEnvelope): Promise<string> 
   });
 }
 
-export function createEnvelope(input: Omit<CommitEnvelope, "protocolVersion">): CommitEnvelope {
+export function createEnvelope(
+  input: Omit<CommitEnvelope, "protocolVersion">,
+): CommitEnvelope {
   return {
     protocolVersion: PROTOCOL_VERSION,
     ...input,

@@ -1,0 +1,31 @@
+project_id = "supasync-dev-v3"
+[api]
+port = 55321
+schemas = ["public", "supasync"]
+extra_search_path = ["public", "extensions"]
+[db]
+port = 55322
+shadow_port = 55320
+major_version = 17
+[db.seed]
+enabled = true
+sql_paths = ["./seed.sql"]
+[studio]
+enabled = true
+port = 55323
+[inbucket]
+enabled = true
+port = 55324
+[auth]
+site_url = "http://127.0.0.1:55321"
+enable_signup = false
+[auth.email]
+enable_signup = false
+enable_confirmations = false
+[storage]
+enabled = true
+file_size_limit = "25MiB"
+[functions.supasync-binary]
+verify_jwt = false
+import_map = "./functions/supasync-binary/deno.json"
+entrypoint = "./functions/supasync-binary/index.ts"

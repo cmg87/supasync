@@ -1,6 +1,6 @@
 {
   "name": "@supasync/obsidian",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -10,10 +10,7 @@
   "dependencies": {
     "@supasync/client": "0.1.0",
     "@supasync/protocol": "0.1.0",
-    "@supasync/sync-core": "0.1.0",
-    "@supasync/daemon-client": "0.2.0",
-    "qrcode": "1.5.4",
-    "jsqr": "1.4.0"
+    "@supasync/sync-core": "0.1.0"
   },
   "devDependencies": {
     "obsidian": "^1.11.4"

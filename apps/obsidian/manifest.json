@@ -1,9 +1,9 @@
 {
   "id": "supasync",
   "name": "SupaSync",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "minAppVersion": "1.11.4",
-  "description": "End-to-end encrypted Obsidian vault sync with local-first Supabase hosting.",
+  "description": "Personal Obsidian sync with a self-hosted PostgreSQL vault.",
   "author": "SupaSync",
   "isDesktopOnly": false
 }

@@ -27,7 +27,9 @@ export class MemoryVault implements VaultAdapter {
   }
 
   async readText(path: string): Promise<string> {
-    return new TextDecoder().decode(await this.readBytes(path));
+    return new TextDecoder("utf-8", { ignoreBOM: true }).decode(
+      await this.readBytes(path),
+    );
   }
 
   async readBytes(path: string): Promise<Uint8Array> {
@@ -36,7 +38,16 @@ export class MemoryVault implements VaultAdapter {
     return bytes;
   }
 
-  async writeText(path: string, text: string): Promise<void> {
+  async writeText(
+    path: string,
+    text: string,
+    expected?: string | null,
+  ): Promise<void> {
+    if (expected !== undefined) {
+      const current = this.files.has(path) ? await this.readText(path) : null;
+      if (current !== expected)
+        throw new Error("Local file changed while applying");
+    }
     await this.writeBytes(path, new TextEncoder().encode(text));
   }
 

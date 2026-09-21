@@ -1,5 +1,11 @@
 import { seqZero } from "@supasync/protocol";
-import type { ApplyIntent, LocalStore, ManifestRow, MetaState, OutboxRow } from "@supasync/sync-core";
+import type {
+  ApplyIntent,
+  LocalStore,
+  ManifestRow,
+  MetaState,
+  OutboxRow,
+} from "@supasync/sync-core";
 
 function openDb(name: string): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -24,10 +30,18 @@ function req<T>(request: IDBRequest<T>): Promise<T> {
 
 export class IndexedDbStore implements LocalStore {
   async getCache<T>(key: string): Promise<T | null> {
-    const db = await this.db(); return (await req<T | undefined>(db.transaction("cache").objectStore("cache").get(key))) ?? null;
+    const db = await this.db();
+    return (
+      (await req<T | undefined>(
+        db.transaction("cache").objectStore("cache").get(key),
+      )) ?? null
+    );
   }
   async putCache(key: string, value: unknown): Promise<void> {
-    const db = await this.db(); const tx = db.transaction("cache", "readwrite"); tx.objectStore("cache").put(value, key); await complete(tx);
+    const db = await this.db();
+    const tx = db.transaction("cache", "readwrite");
+    tx.objectStore("cache").put(value, key);
+    await complete(tx);
   }
   constructor(private readonly name: string) {}
 
@@ -39,12 +53,13 @@ export class IndexedDbStore implements LocalStore {
 
   async getMeta(): Promise<MetaState> {
     const db = await this.db();
-    const value = await req<MetaState | undefined>(db.transaction("meta").objectStore("meta").get("current"));
+    const value = await req<MetaState | undefined>(
+      db.transaction("meta").objectStore("meta").get("current"),
+    );
     return (
       value ?? {
         installationId: crypto.randomUUID(),
         clientId: crypto.randomUUID(),
-        generation: 1,
         vaultId: null,
         serverEpoch: null,
         receivedCursor: seqZero(),
@@ -67,7 +82,9 @@ export class IndexedDbStore implements LocalStore {
 
   async getManifest(): Promise<Map<string, ManifestRow>> {
     const db = await this.db();
-    const rows = await req<ManifestRow[]>(db.transaction("manifest").objectStore("manifest").getAll());
+    const rows = await req<ManifestRow[]>(
+      db.transaction("manifest").objectStore("manifest").getAll(),
+    );
     return new Map((rows ?? []).map((row) => [row.entryId, row]));
   }
 
@@ -87,7 +104,11 @@ export class IndexedDbStore implements LocalStore {
 
   async listOutbox(): Promise<OutboxRow[]> {
     const db = await this.db();
-    return (await req<OutboxRow[]>(db.transaction("outbox").objectStore("outbox").getAll())) ?? [];
+    return (
+      (await req<OutboxRow[]>(
+        db.transaction("outbox").objectStore("outbox").getAll(),
+      )) ?? []
+    );
   }
 
   async putOutbox(row: OutboxRow): Promise<void> {
@@ -113,7 +134,11 @@ export class IndexedDbStore implements LocalStore {
 
   async getIntent(path: string): Promise<ApplyIntent | null> {
     const db = await this.db();
-    return (await req<ApplyIntent | undefined>(db.transaction("intents").objectStore("intents").get(path))) ?? null;
+    return (
+      (await req<ApplyIntent | undefined>(
+        db.transaction("intents").objectStore("intents").get(path),
+      )) ?? null
+    );
   }
 
   async deleteIntent(path: string): Promise<void> {
@@ -125,7 +150,11 @@ export class IndexedDbStore implements LocalStore {
 
   async listIntents(): Promise<ApplyIntent[]> {
     const db = await this.db();
-    return (await req<ApplyIntent[]>(db.transaction("intents").objectStore("intents").getAll())) ?? [];
+    return (
+      (await req<ApplyIntent[]>(
+        db.transaction("intents").objectStore("intents").getAll(),
+      )) ?? []
+    );
   }
 }
 

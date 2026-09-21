@@ -1,30 +1,28 @@
 # Deployment
 
-Build and install the tarball as described in the README. Normal local setup uses the official `self-hosted/v0.8.1` Supabase release, resolved commit `8c7a4d9dbbaf8b552893822e89d7bf06f33f9220`. Service image versions come from that pinned Compose file. Each installation has a separate Docker project derived from its backend directory. Only the existing Supabase gateway is published, on `127.0.0.1`; Studio, Postgres and the pooler are not separately exposed.
+Build locally, pack the CLI workspace, install the resulting tarball, and run `supasync setup`. The package includes plugin assets, schema, binary Edge Function, and development configuration.
 
-```bash
-supasync setup --mode local --port 8000 --dry-run
-supasync setup --mode local --port 8000 --yes
+Setup uses the pinned official Supabase Docker distribution recorded in installer constants. It creates a distinct Compose project per installation directory. Install state defaults to `~/.config/supasync`, overridable through `SUPASYNC_HOME` or `--home`.
+
+```sh
+supasync setup --mode local --vault-path /absolute/path/to/vault
+supasync setup --mode local-tailnet --vault-path /absolute/path/to/vault
 supasync doctor
 supasync backend status
 ```
 
-Setup discovers dependencies, prepares private backend configuration, starts persistent containers, installs schema/functions, checks health, and exports a public profile. `--vault-path` additionally installs the plugin into that explicitly selected vault. Repeating setup preserves generated credentials and installation identity. Failure leaves completed task records for diagnosis/retry. No setup path runs a database reset or deletes volumes.
+Interactive setup uses select prompts. Automated setup supplies `--email`, `--password-stdin`, `--vault-path`, and `--yes`; secrets should not be placed in arguments. `--port` and `--database-port` choose unused loopback ports. `--dry-run` performs no installation.
 
-For private second-device access, install Tailscale and sign in on the host first, then use `--mode local-tailnet` in a new installation. Setup calls Tailscale Serve to publish the gateway over tailnet HTTPS, never Funnel. Sign in to Tailscale on the second device and scan the connection profile. Private HTTPS, mobile and host-reboot behavior require the manual tests in TESTING.md.
+The installer writes URL, public key, vault UUID, and admin email into `.obsidian/plugins/supasync/data.json`. Sign in once from Obsidian; the installer never writes its admin password or tokens into the vault. A non-secret connection.json/profile QR can configure other devices. Mobile clients need the host's private HTTPS URL; their localhost is not the backend host.
 
-Existing/managed Supabase must already have the v2 schema and `supasync-api` deployed by its operator. Use the SQL under `supabase/migrations` and deploy `supabase/functions/supasync-api`. The function validates the user's JWT with Auth and is the only caller of the private dispatcher. Configure its server-side Supabase URL and service-role key; never put that key into a profile or plugin. The dispatcher is unavailable to `anon` and `authenticated`. Then connect with:
+Tailscale mode requires an installed, signed-in Tailscale client and uses Serve, never Funnel. External networking changes and real mobile connectivity require the checks in TESTING.md. Direct PostgreSQL is loopback-only by default, with TLS; remote Hermes can use an SSH tunnel to that port and the generated CA.
 
-```bash
-supasync setup --mode existing --url https://your-backend --anon-key PUBLIC_KEY
-```
+Normal setup provisions only the requested admin and vault. It does not import fixture users, run dev seeds, or reset data. Re-running setup preserves identities. It refuses an existing protocol-2 installation: select a fresh installation directory and ports.
 
-## Developer stack
+Setting up another local vault creates a separate remote vault by default. Pass `--vault-id UUID` to bind it to an existing remote vault instead. Local-to-remote choices are persisted before provisioning so interrupted runs reuse the same UUID.
 
-For a **fresh project-local test stack**, run `npm run dev:backend`; this starts the Supabase CLI development stack and serves functions. Apply the v2 migration using the local Supabase migration workflow. Do not reset an existing database to hide migration or encryption failures. The v1 migration chain is preserved in Git at `supasync-v1-baseline-20260919`; fresh v2 installs do not create plaintext v1 tables. Existing v1 operators must back up and choose an explicit cutover. V2 retires the old dispatcher but does not erase old data.
+Development commands use a separate cache directory, project ID `supasync-dev-v3`, and ports 55320–55324. `dev seed` explicitly creates development-only credentials. `dev reset --yes` resets that marked development project only. The checked-in seed SQL remains empty.
 
-## Updates and removal
+Back up with `supasync backup create --file DIRECTORY`, verify checksums with `backup verify`, and restore only into a separate empty matching backend. Backup data includes Auth, canonical files, revisions, receipts, settings, and Storage bytes. Keep the backup private.
 
-`supasync backend update --dry-run` reports the installed and supported pinned release. Cross-release automated backend upgrades are not implemented yet; the command refuses an unsupported change. Make and verify a backup before an operator-managed upgrade. Plugin updates use `supasync plugin update --vault-path PATH` and preserve settings.
-
-`supasync backend down` stops/removes containers while retaining persistent volumes. `supasync service uninstall` removes the per-user service, retaining local data and keys. Never delete the installation directory as an update procedure.
+`supasync restore-backup --home /new/installation --file /backup --port 8001 --database-port 55433` creates an empty matching backend, restores it, regenerates Hermes credentials, and assigns a new epoch. It refuses to overwrite populated targets.

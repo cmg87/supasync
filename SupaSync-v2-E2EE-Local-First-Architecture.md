@@ -1,5 +1,7 @@
 # SupaSync v2 — E2EE, Local-First Installer, Daemon, and Deployment Architecture
 
+> Historical, superseded development architecture. Do not implement its E2EE, tenancy, enrollment, or daemon requirements. See docs/ARCHITECTURE.md for the current plaintext design.
+
 **Revision:** 2.0  
 **Prepared:** September 19, 2026  
 **Repository:** https://github.com/cmg87/supasync  

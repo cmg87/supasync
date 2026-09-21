@@ -1,4 +1,4 @@
-import { encode, unencode } from "@supasync/crypto";
+import { encode, unencode } from "@supasync/protocol";
 import {
   DEFAULT_LIMITS,
   ProtocolError,
@@ -40,7 +40,39 @@ export type SyncReport = {
 
 export class SyncEngine {
   private paused: boolean;
-  private expectedEcho = new Set<string>();
+  private structuralEcho = new Set<string>();
+
+  matchesStructuralEcho(
+    type: "delete" | "rename",
+    path: string,
+    to = "",
+  ): boolean {
+    const key = `${type}:${path}:${to}`;
+    if (!this.structuralEcho.has(key)) return false;
+    this.structuralEcho.delete(key);
+    return true;
+  }
+  private async removeRemote(path: string) {
+    const keys = (await this.opts.vault.list())
+      .filter((r) => r.path === path || r.path.startsWith(path + "/"))
+      .map((r) => `delete:${r.path}:`);
+    keys.push(`delete:${path}:`);
+    for (const key of keys) this.structuralEcho.add(key);
+    try {
+      await this.opts.vault.remove(path);
+    } finally {
+      for (const key of keys) this.structuralEcho.delete(key);
+    }
+  }
+  private async renameRemote(from: string, to: string) {
+    const key = `rename:${from}:${to}`;
+    this.structuralEcho.add(key);
+    try {
+      await this.opts.vault.rename(from, to);
+    } finally {
+      this.structuralEcho.delete(key);
+    }
+  }
 
   constructor(private readonly opts: EngineOptions) {
     this.paused = opts.paused ?? false;
@@ -81,15 +113,6 @@ export class SyncEngine {
     report.pulled += await this.pullAndApply(undefined, report);
     report.pushed += await this.pushOutbox(report);
     report.pulled += await this.pullAndApply(undefined, report);
-    const latest = await this.opts.store.getMeta();
-    if (latest.appliedCursor !== seqZero()) {
-      await this.opts.api.ackApplied({
-        vaultId: this.opts.vaultId,
-        clientId: latest.clientId,
-        clientGeneration: latest.generation,
-        appliedSeq: latest.appliedCursor,
-      });
-    }
     return report;
   }
 
@@ -106,7 +129,6 @@ export class SyncEngine {
     const snap = await this.opts.api.beginSnapshot({
       vaultId: this.opts.vaultId,
       clientId: (await this.opts.store.getMeta()).clientId,
-      clientGeneration: (await this.opts.store.getMeta()).generation,
     });
     const page = {
       items: [] as Array<{ entryId: string; revision: RevisionRecord }>,
@@ -148,6 +170,7 @@ export class SyncEngine {
             await this.remember(item.revision, sha);
           } else {
             await this.preserveConflict(item.revision, text, report);
+            await this.applyRevision(item.revision, report, true);
           }
         } else if (item.revision.kind === "blob") {
           const bytes = await this.opts.vault.readBytes(local.path);
@@ -179,14 +202,26 @@ export class SyncEngine {
     const pendingIds = new Set(
       pending.map((p) => (p.envelope as CommitEnvelope).entryId),
     );
+    const events =
+      (await this.opts.store.getCache<Array<{ type: string; to?: string }>>(
+        "filesystem-events",
+      )) ?? [];
     if (listed.length === 0) return; // An empty listing alone is never proof of deletion.
     for (const stat of listed.sort(
       (a, b) => a.path.split("/").length - b.path.split("/").length,
     )) {
       if (pendingPaths.has(stat.path)) continue;
       if (
+        events.some(
+          (e) =>
+            e.type === "rename" &&
+            e.to &&
+            (stat.path === e.to || stat.path.startsWith(e.to + "/")),
+        )
+      )
+        continue;
+      if (
         stat.kind === "folder" &&
-        this.opts.api.readBlob &&
         !isExcluded(stat.path, this.opts.vault.configDir())
       ) {
         if (!byPath.has(stat.path)) {
@@ -230,28 +265,22 @@ export class SyncEngine {
         await this.enqueueCreate(stat.path, report);
         continue;
       }
-      if (isMarkdownPath(stat.path)) {
-        const text = await this.opts.vault.readText(stat.path);
+      const captured = await this.capture(stat.path);
+      if (captured.text !== null) {
+        const text = captured.text;
         const sha = await hashMarkdown(text);
-        if (sha !== row.localHash) {
+        if (sha !== row.baseHash) {
           await this.enqueueUpdate(row, text, sha);
         }
       } else {
         const bytes = await this.opts.vault.readBytes(stat.path);
         const sha = await hashBytes(bytes);
-        if (sha !== row.localHash) {
+        if (sha !== row.baseHash) {
           await this.enqueueBlobUpdate(row, bytes, sha);
         }
       }
     }
-    for (const row of [...byPath.values()].sort(
-      (a, b) => b.path.split("/").length - a.path.split("/").length,
-    )) {
-      if (pendingIds.has(row.entryId)) continue;
-      if (!(await this.opts.vault.exists(row.path))) {
-        await this.enqueueDelete(row);
-      }
-    }
+    // Only explicit, persisted deletion events may remove remote entries.
   }
 
   private async enqueueCreate(
@@ -262,97 +291,64 @@ export class SyncEngine {
     const canon = canonicalizePath(path);
     const entryId = crypto.randomUUID();
     const operationId = crypto.randomUUID();
-    if (isMarkdownPath(path)) {
-      const text = await this.opts.vault.readText(path);
-      const sha = await hashMarkdown(text);
-      const envelope = this.envelope(meta, {
-        operationId,
-        type: "create",
-        entryId,
-        payload: { path: canon.display, kind: "markdown", text },
-      });
-      await this.opts.store.putOutbox({
-        operationId,
-        envelope,
-        extras: { pathKey: canon.pathKey, textSha256: sha },
-        status: "queued",
-        sentHash: sha,
-      });
-      await this.opts.store.putManifest({
-        entryId,
+    const captured = await this.capture(path);
+    const sha = await hashBytes(captured.bytes);
+    const envelope = this.envelope(meta, {
+      operationId,
+      type: "create",
+      entryId,
+      payload: {
         path: canon.display,
-        kind: "markdown",
-        remoteSeq: seqZero(),
-        remoteHash: null,
-        localHash: sha,
-        baseSeq: seqZero(),
-        baseHash: null,
-        deleted: false,
-        blobId: null,
-      });
-    } else {
-      const bytes = await this.opts.vault.readBytes(path);
-      const sha = await hashBytes(bytes);
-      if (this.opts.api.readBlob) {
-        const envelope = this.envelope(meta, {
-          operationId,
-          type: "create",
-          entryId,
-          payload: { path: canon.display, kind: "blob", bytes: encode(bytes) },
-        });
-        await this.opts.store.putOutbox({
-          operationId,
-          envelope,
-          extras: {},
-          status: "queued",
-          sentHash: sha,
-        });
-        return;
-      }
-      const blob = await this.opts.api.beginBlobUpload({
-        vaultId: this.opts.vaultId,
-        expectedSha256: sha,
-        expectedLength: bytes.byteLength,
-      });
-      if (blob.transfer && typeof blob.transfer === "object") {
-        const transfer = blob.transfer as {
-          url: string;
-          method: string;
-          headers: Record<string, string>;
-        };
-        if (transfer.url.startsWith("memory://")) {
-          // in-memory tests skip bytes
-        } else {
-          const response = await (this.opts.fetch ?? fetch)(transfer.url, {
-            method: transfer.method,
-            headers: transfer.headers,
-            body: bytes as unknown as BlobPart,
-          });
-          if (!response.ok)
-            throw new ProtocolError(
-              "RETRYABLE_TRANSPORT",
-              `Attachment upload failed (HTTP ${response.status})`,
-            );
-        }
-      }
-      await this.opts.api.finalizeBlob({
-        vaultId: this.opts.vaultId,
-        blobId: String(blob.blobId),
-      });
-      const envelope = this.envelope(meta, {
-        operationId,
-        type: "create",
-        entryId,
-        payload: { path: canon.display, kind: "blob", blob_id: blob.blobId },
-      });
-      await this.opts.store.putOutbox({
-        operationId,
-        envelope,
-        extras: { pathKey: canon.pathKey },
-        status: "queued",
-        sentHash: sha,
-      });
-    }
+        ...(captured.text !== null
+          ? { kind: "markdown", text: captured.text }
+          : { kind: "blob", bytes: encode(captured.bytes) }),
+      },
+    });
+    await this.opts.store.putOutbox({
+      operationId,
+      envelope,
+      extras: {},
+      status: "queued",
+      sentHash: sha,
+    });
+    await this.opts.store.putManifest({
+      entryId,
+      path: canon.display,
+      kind: captured.text !== null ? "markdown" : "blob",
+      remoteSeq: "0",
+      remoteHash: null,
+      localHash: sha,
+      baseSeq: "0",
+      baseHash: null,
+      deleted: false,
+      blobId: null,
+    });
+  }
+
+  private async capture(
+    path: string,
+  ): Promise<{ bytes: Uint8Array; text: string | null }> {
+    const bytes = await this.opts.vault.readBytes(path);
+    let text: string | null = null;
+    try {
+      const value = new TextDecoder("utf-8", {
+        fatal: true,
+        ignoreBOM: true,
+      }).decode(bytes);
+      if (!/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(value)) text = value;
+    } catch {}
+    if (isMarkdownPath(path) && text === null)
+      throw new Error(
+        "Markdown must be valid UTF-8 without NUL bytes: " + path,
+      );
+    if (
+      bytes.length >
+      (text === null
+        ? DEFAULT_LIMITS.maxBlobBytes
+        : DEFAULT_LIMITS.maxTextBytes)
+    )
+      throw new Error("File exceeds supported size limit: " + path);
+    return { bytes, text };
   }
 
   private async enqueueUpdate(
@@ -366,7 +362,7 @@ export class SyncEngine {
       operationId,
       type: "update",
       entryId: row.entryId,
-      baseRevisionId: row.remoteSeq === seqZero() ? undefined : row.remoteSeq,
+      baseRevisionId: row.baseSeq === seqZero() ? undefined : row.baseSeq,
       payload: { path: row.path, text },
     });
     await this.opts.store.putOutbox({
@@ -384,43 +380,14 @@ export class SyncEngine {
     bytes: Uint8Array,
     sha: string,
   ): Promise<void> {
-    if (this.opts.api.readBlob) {
-      const meta = await this.opts.store.getMeta();
-      const operationId = crypto.randomUUID();
-      const envelope = this.envelope(meta, {
-        operationId,
-        type: "update",
-        entryId: row.entryId,
-        baseRevisionId: row.remoteSeq,
-        payload: { path: row.path, kind: "blob", bytes: encode(bytes) },
-      });
-      await this.opts.store.putOutbox({
-        operationId,
-        envelope,
-        extras: {},
-        status: "queued",
-        sentHash: sha,
-      });
-      await this.opts.store.putManifest({ ...row, localHash: sha });
-      return;
-    }
-    const blob = await this.opts.api.beginBlobUpload({
-      vaultId: this.opts.vaultId,
-      expectedSha256: sha,
-      expectedLength: bytes.byteLength,
-    });
-    await this.opts.api.finalizeBlob({
-      vaultId: this.opts.vaultId,
-      blobId: String(blob.blobId),
-    });
     const meta = await this.opts.store.getMeta();
     const operationId = crypto.randomUUID();
     const envelope = this.envelope(meta, {
       operationId,
       type: "update",
       entryId: row.entryId,
-      baseRevisionId: row.remoteSeq,
-      payload: { blob_id: blob.blobId },
+      baseRevisionId: row.baseSeq,
+      payload: { path: row.path, kind: "blob", bytes: encode(bytes) },
     });
     await this.opts.store.putOutbox({
       operationId,
@@ -429,11 +396,7 @@ export class SyncEngine {
       status: "queued",
       sentHash: sha,
     });
-    await this.opts.store.putManifest({
-      ...row,
-      localHash: sha,
-      blobId: String(blob.blobId),
-    });
+    await this.opts.store.putManifest({ ...row, localHash: sha });
   }
 
   private async enqueueDelete(row: ManifestRow): Promise<void> {
@@ -447,8 +410,22 @@ export class SyncEngine {
       operationId,
       type: "delete",
       entryId: row.entryId,
-      baseRevisionId: row.remoteSeq,
-      payload: {},
+      baseRevisionId: row.baseSeq,
+      payload:
+        row.kind === "folder"
+          ? {
+              treeBase: Object.fromEntries(
+                [...(await this.opts.store.getManifest()).values()]
+                  .filter(
+                    (x) =>
+                      !x.deleted &&
+                      (x.entryId === row.entryId ||
+                        x.path.startsWith(row.path + "/")),
+                  )
+                  .map((x) => [x.entryId, x.baseSeq]),
+              ),
+            }
+          : {},
     });
     await this.opts.store.putOutbox({
       operationId,
@@ -512,6 +489,7 @@ export class SyncEngine {
       );
       await this.opts.store.putManifest(row);
     }
+    if (row && BigInt(row.remoteSeq) >= BigInt(rev.seq)) return;
     if (rev.tombstone) {
       if (row && row.localHash && row.localHash !== row.baseHash) {
         if (row.kind === "blob")
@@ -537,12 +515,30 @@ export class SyncEngine {
       await this.applyRevision(rev, report, false);
       return;
     }
-    if (rev.path !== row.path && (await this.opts.vault.exists(rev.path)))
+    if (
+      rev.kind !== "folder" &&
+      rev.path !== row.path &&
+      (await this.opts.vault.exists(rev.path))
+    )
       throw new Error(
         "Local rename destination is occupied; preserve both paths before retrying",
       );
     if (rev.path !== row.path && (await this.opts.vault.exists(row.path))) {
-      await this.opts.vault.rename(row.path, rev.path);
+      const fromPath = row.path;
+      await this.opts.store.putIntent({
+        path: rev.path,
+        fromPath,
+        beforeHash: row.localHash,
+        afterHash: row.localHash,
+        seq: rev.seq,
+        entryId: rev.entryId,
+      });
+      if (rev.kind === "folder" && (await this.opts.vault.exists(rev.path))) {
+        const remaining = (await this.opts.vault.list()).filter(
+          (f) => f.kind === "file" && f.path.startsWith(row.path + "/"),
+        );
+        if (!remaining.length) await this.removeRemote(row.path);
+      } else await this.renameRemote(row.path, rev.path);
       if (rev.kind === "folder") {
         for (const child of manifest.values())
           if (child.path.startsWith(`${row.path}/`))
@@ -552,6 +548,8 @@ export class SyncEngine {
             });
       }
       row.path = rev.path;
+      await this.opts.store.putManifest(row);
+      await this.opts.store.deleteIntent(rev.path);
     }
     if (rev.textSha256 === row.localHash && rev.path === row.path) {
       await this.remember(rev, row.localHash);
@@ -591,15 +589,15 @@ export class SyncEngine {
             ...row,
             remoteSeq: rev.seq,
             remoteHash: rev.textSha256,
-            baseSeq: rev.seq,
+            baseSeq: rev.revision,
             baseHash: rev.textSha256,
           },
           merged.text,
           await hashMarkdown(merged.text),
         );
       } else {
-        await this.applyRevision(rev, report, false);
         await this.preserveConflict(rev, localText, report);
+        await this.applyRevision(rev, report, false);
       }
     }
   }
@@ -609,6 +607,16 @@ export class SyncEngine {
     report: SyncReport,
     bootstrap: boolean,
   ): Promise<void> {
+    if (
+      !bootstrap &&
+      rev.kind !== "folder" &&
+      !(await this.opts.store.getManifest()).has(rev.entryId) &&
+      (await this.opts.vault.exists(rev.path))
+    ) {
+      const bytes = await this.opts.vault.readBytes(rev.path);
+      if ((await hashBytes(bytes)) !== rev.textSha256)
+        await this.preserveBinary(rev, bytes, report);
+    }
     if (rev.kind === "folder") {
       await this.opts.vault.mkdir(rev.path);
       await this.remember(rev, null);
@@ -627,10 +635,20 @@ export class SyncEngine {
     if (rev.kind === "blob" && rev.blobId) {
       if (this.opts.api.readBlob) {
         const bytes = await this.opts.api.readBlob(rev.blobId);
-        const before = (await this.opts.vault.exists(rev.path))
-          ? await hashBytes(await this.opts.vault.readBytes(rev.path))
+        const original = (await this.opts.vault.exists(rev.path))
+          ? await this.opts.vault.readBytes(rev.path)
           : null;
+        const before = original ? await hashBytes(original) : null;
         const after = await hashBytes(bytes);
+        if (after !== rev.textSha256) throw new Error("HASH_MISMATCH");
+        const row = (await this.opts.store.getManifest()).get(rev.entryId);
+        if (
+          original &&
+          before !== after &&
+          before !== row?.localHash &&
+          before !== row?.baseHash
+        )
+          await this.preserveBinary(rev, original, report);
         await this.opts.store.putIntent({
           path: rev.path,
           beforeHash: before,
@@ -638,42 +656,18 @@ export class SyncEngine {
           seq: rev.seq,
           entryId: rev.entryId,
         });
-        await this.opts.vault.writeBytes(rev.path, bytes);
+        const echo = `delete:${rev.path}:`;
+        this.structuralEcho.add(echo);
+        try {
+          await this.opts.vault.writeBytes(rev.path, bytes);
+        } finally {
+          this.structuralEcho.delete(echo);
+        }
         await this.remember(rev, after);
         await this.opts.store.deleteIntent(rev.path);
         report.applied++;
         return;
       }
-      const dl = await this.opts.api.getBlobDownload({
-        vaultId: this.opts.vaultId,
-        blobId: rev.blobId,
-      });
-      if (dl.transfer.url.startsWith("memory://")) {
-        await this.remember(rev, dl.verifiedSha256);
-        return;
-      }
-      const res = await (this.opts.fetch ?? fetch)(dl.transfer.url, {
-        method: dl.transfer.method,
-        headers: dl.transfer.headers,
-      });
-      if (!res.ok)
-        throw new ProtocolError(
-          "RETRYABLE_TRANSPORT",
-          `Attachment download failed (HTTP ${res.status})`,
-        );
-      const bytes = new Uint8Array(await res.arrayBuffer());
-      if (
-        bytes.byteLength !== dl.verifiedLength ||
-        (await hashBytes(bytes)) !== dl.verifiedSha256
-      ) {
-        throw new ProtocolError(
-          "HASH_MISMATCH",
-          "Downloaded attachment failed integrity verification",
-        );
-      }
-      await this.opts.vault.writeBytes(rev.path, bytes);
-      await this.remember(rev, dl.verifiedSha256);
-      report.applied++;
     }
     void bootstrap;
   }
@@ -684,10 +678,19 @@ export class SyncEngine {
     rev: RevisionRecord,
     report: SyncReport,
   ): Promise<void> {
-    const before = (await this.opts.vault.exists(path))
-      ? await hashMarkdown(await this.opts.vault.readText(path))
+    const original = (await this.opts.vault.exists(path))
+      ? await this.opts.vault.readText(path)
       : null;
+    const before = original === null ? null : await hashMarkdown(original);
     const after = await hashMarkdown(text);
+    const row = (await this.opts.store.getManifest()).get(rev.entryId);
+    if (
+      original !== null &&
+      before !== after &&
+      before !== row?.localHash &&
+      before !== row?.baseHash
+    )
+      await this.preserveConflict(rev, original, report);
     await this.opts.store.putIntent({
       path,
       beforeHash: before,
@@ -695,8 +698,7 @@ export class SyncEngine {
       seq: rev.seq,
       entryId: rev.entryId,
     });
-    this.expectedEcho.add(`${path}:${before}:${after}`);
-    await this.opts.vault.writeText(path, text);
+    await this.opts.vault.writeText(path, text, original);
     await this.remember(rev, after);
     await this.opts.store.deleteIntent(path);
     report.applied++;
@@ -707,6 +709,18 @@ export class SyncEngine {
     rev: RevisionRecord,
     report: SyncReport,
   ): Promise<void> {
+    // Child journal events run first. Never recursively remove untracked local work.
+    if (
+      rev.kind === "folder" &&
+      (await this.opts.vault.list()).some((f) => f.path.startsWith(path + "/"))
+    )
+      return;
+    if (rev.kind !== "folder" && (await this.opts.vault.exists(path))) {
+      const current = await this.opts.vault.readBytes(path);
+      const row = (await this.opts.store.getManifest()).get(rev.entryId);
+      if ((await hashBytes(current)) !== row?.localHash)
+        await this.preserveBinary(rev, current, report);
+    }
     await this.opts.store.putIntent({
       path,
       beforeHash: null,
@@ -714,7 +728,7 @@ export class SyncEngine {
       seq: rev.seq,
       entryId: rev.entryId,
     });
-    if (await this.opts.vault.exists(path)) await this.opts.vault.remove(path);
+    if (await this.opts.vault.exists(path)) await this.removeRemote(path);
     await this.opts.store.deleteIntent(path);
     report.applied++;
   }
@@ -727,7 +741,6 @@ export class SyncEngine {
     const meta = await this.opts.store.getMeta();
     const op = crypto.randomUUID();
     const copyPath = conflictCopyPath(rev.path, meta.label, op);
-    await this.opts.vault.writeText(copyPath, localText);
     const sha = await hashMarkdown(localText);
     const envelope = this.envelope(meta, {
       operationId: op,
@@ -748,6 +761,7 @@ export class SyncEngine {
       status: "queued",
       sentHash: sha,
     });
+    await this.opts.vault.writeText(copyPath, localText);
     report.conflicts++;
   }
 
@@ -759,6 +773,19 @@ export class SyncEngine {
     const meta = await this.opts.store.getMeta();
     const op = crypto.randomUUID();
     const copyPath = conflictCopyPath(rev.path, meta.label, op);
+    const envelope = this.envelope(meta, {
+      operationId: op,
+      type: "create",
+      entryId: crypto.randomUUID(),
+      payload: { path: copyPath, kind: "blob", bytes: encode(bytes) },
+    });
+    await this.opts.store.putOutbox({
+      operationId: op,
+      envelope,
+      extras: {},
+      status: "queued",
+      sentHash: await hashBytes(bytes),
+    });
     await this.opts.vault.writeBytes(copyPath, bytes);
     report.conflicts++;
   }
@@ -775,12 +802,54 @@ export class SyncEngine {
           row.extras,
         );
         if (result.outcome === "conflict") {
+          const conflicts =
+            (await this.opts.store.getCache<unknown[]>("conflicts")) ?? [];
+          await this.opts.store.putCache("conflicts", [
+            ...conflicts,
+            {
+              envelope: row.envelope,
+              reason: result.message,
+              current: result.current,
+            },
+          ]);
+          // Preserve the captured payload, even if the source was edited or removed after send.
+          const env = row.envelope as CommitEnvelope;
+          if (
+            typeof env.payload.text === "string" ||
+            typeof env.payload.bytes === "string"
+          ) {
+            const target =
+              result.current ??
+              ({
+                path: String(env.payload.path ?? "Recovered.md"),
+                entryId: env.entryId!,
+              } as RevisionRecord);
+            if (typeof env.payload.text === "string")
+              await this.preserveConflict(target, env.payload.text, report);
+            else
+              await this.preserveBinary(
+                target,
+                unencode(env.payload.bytes as string),
+                report,
+              );
+          }
           report.errors.push(result.message ?? "BASE_CONFLICT");
-          if (result.current)
+          if (result.current) {
+            const local = (await this.opts.store.getManifest()).get(
+              result.current.entryId,
+            );
+            if (local && (env.type === "rename" || env.type === "delete"))
+              await this.opts.store.putManifest({ ...local, remoteSeq: "0" });
             await this.reconcileRevision(result.current, report);
+          }
+          if (
+            env.type === "create" &&
+            env.entryId &&
+            result.current?.entryId !== env.entryId
+          )
+            await this.opts.store.deleteManifest(env.entryId);
         } else if (result.revision) {
-          const sha = row.sentHash;
-          await this.remember(result.revision, sha);
+          await this.reconcileRevision(result.revision, report);
           pushed++;
         }
         await this.opts.store.deleteOutbox(row.operationId);
@@ -800,11 +869,29 @@ export class SyncEngine {
 
   private async recoverIntents(report: SyncReport): Promise<void> {
     for (const intent of await this.opts.store.listIntents()) {
+      if (intent.fromPath) {
+        if (
+          !(await this.opts.vault.exists(intent.fromPath)) &&
+          (await this.opts.vault.exists(intent.path))
+        ) {
+          for (const row of (await this.opts.store.getManifest()).values()) {
+            if (
+              row.path === intent.fromPath ||
+              row.path.startsWith(intent.fromPath + "/")
+            )
+              await this.opts.store.putManifest({
+                ...row,
+                path: intent.path + row.path.slice(intent.fromPath.length),
+              });
+          }
+          await this.opts.store.deleteIntent(intent.path);
+        }
+        continue;
+      }
       const exists = await this.opts.vault.exists(intent.path);
-      const current =
-        exists && isMarkdownPath(intent.path)
-          ? await hashMarkdown(await this.opts.vault.readText(intent.path))
-          : null;
+      const current = exists
+        ? await hashBytes(await this.opts.vault.readBytes(intent.path))
+        : null;
       if (current === intent.afterHash) {
         await this.opts.store.deleteIntent(intent.path);
       } else if (current === intent.beforeHash && intent.afterHash) {
@@ -826,14 +913,14 @@ export class SyncEngine {
       remoteSeq: rev.seq,
       remoteHash: rev.textSha256,
       localHash: localHash ?? rev.textSha256,
-      baseSeq: rev.seq,
+      baseSeq: rev.revision,
       baseHash: rev.textSha256,
       deleted: rev.tombstone,
       blobId: rev.blobId,
     });
   }
 
-  async deleteLocal(path: string): Promise<void> {
+  async deleteLocal(path: string): Promise<boolean> {
     // Called only for an explicit deletion event, never merely for an empty scan.
     const pending = new Set(
       (await this.opts.store.listOutbox()).map(
@@ -845,13 +932,31 @@ export class SyncEngine {
         (r) => !r.deleted && (r.path === path || r.path.startsWith(`${path}/`)),
       )
       .sort((a, b) => b.path.split("/").length - a.path.split("/").length);
-    for (const row of rows)
-      if (!pending.has(row.entryId)) await this.enqueueDelete(row);
+    if (rows.some((row) => pending.has(row.entryId))) return false;
+    const root = rows.find((row) => row.path === path);
+    if (root) await this.enqueueDelete(root);
+    else for (const row of rows) await this.enqueueDelete(row);
+    return true;
   }
 
-  async renameLocal(from: string, to: string): Promise<void> {
+  async renameLocal(from: string, to: string): Promise<boolean> {
     const meta = await this.opts.store.getMeta();
-    for (const row of (await this.opts.store.getManifest()).values()) {
+    const original = [...(await this.opts.store.getManifest()).values()];
+    const pending = new Set(
+      (await this.opts.store.listOutbox()).map(
+        (x) => (x.envelope as CommitEnvelope).entryId,
+      ),
+    );
+    if (
+      original.some(
+        (row) =>
+          !row.deleted &&
+          (row.path === from || row.path.startsWith(from + "/")) &&
+          pending.has(row.entryId),
+      )
+    )
+      return false;
+    for (const row of original) {
       if (
         row.deleted ||
         (row.path !== from && !row.path.startsWith(`${from}/`))
@@ -866,8 +971,25 @@ export class SyncEngine {
             operationId,
             type: "rename",
             entryId: row.entryId,
-            baseRevisionId: row.remoteSeq,
-            payload: { path, kind: row.kind },
+            baseRevisionId: row.baseSeq,
+            payload: {
+              path,
+              kind: row.kind,
+              ...(row.kind === "folder"
+                ? {
+                    treeBase: Object.fromEntries(
+                      original
+                        .filter(
+                          (x) =>
+                            !x.deleted &&
+                            (x.entryId === row.entryId ||
+                              x.path.startsWith(from + "/")),
+                        )
+                        .map((x) => [x.entryId, x.baseSeq]),
+                    ),
+                  }
+                : {}),
+            },
           }),
           extras: {},
           status: "queued",
@@ -876,30 +998,14 @@ export class SyncEngine {
       }
       await this.opts.store.putManifest({ ...row, path });
     }
-  }
-
-  matchesEcho(
-    path: string,
-    fromHash: string | null,
-    toHash: string | null,
-  ): boolean {
-    const key = `${path}:${fromHash}:${toHash}`;
-    if (this.expectedEcho.has(key)) {
-      this.expectedEcho.delete(key);
-      return true;
-    }
-    return false;
+    return true;
   }
 
   private envelope(
-    meta: { clientId: string; generation: number; serverEpoch: string | null },
+    meta: { clientId: string; serverEpoch: string | null },
     partial: Omit<
       CommitEnvelope,
-      | "protocolVersion"
-      | "serverEpoch"
-      | "vaultId"
-      | "clientId"
-      | "clientGeneration"
+      "protocolVersion" | "serverEpoch" | "vaultId" | "clientId"
     >,
   ): CommitEnvelope {
     return createEnvelope({
@@ -907,7 +1013,6 @@ export class SyncEngine {
       serverEpoch: meta.serverEpoch ?? "",
       vaultId: this.opts.vaultId,
       clientId: meta.clientId,
-      clientGeneration: meta.generation,
     });
   }
 }

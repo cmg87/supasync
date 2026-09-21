@@ -1,5 +1,7 @@
 # SupaSync — Architecture and Build Plan
 
+> Historical v1 specification. The current single-owner plaintext implementation is specified in docs/ARCHITECTURE.md and docs/PROTOCOL.md.
+
 **Revision:** 1.0 · **Prepared:** September 18, 2026  
 **Status:** Implementation specification, not an implemented or tested plugin.  
 **Audience:** Codex, Cursor, or another coding agent implementing the project end to end.

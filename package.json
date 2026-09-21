@@ -1,6 +1,6 @@
 {
   "name": "supasync",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "private": true,
   "description": "Obsidian vault synchronization through Supabase Postgres and object storage",
   "license": "MIT",
@@ -15,20 +15,27 @@
     "test:watch": "vitest",
     "test:unit": "vitest run tests/unit packages",
     "test:property": "vitest run tests/property",
-    "test:integration": "vitest run tests/integration tests/faults",
-    "dev:backend": "node scripts/dev-backend.mjs",
-    "seed": "node scripts/seed.mjs",
+    "test:database": "node scripts/test-database.mjs",
+    "test:integration": "node scripts/test-database.mjs --http",
+    "test:installation": "node scripts/test-installation.mjs",
+    "test:package": "node scripts/test-package.mjs",
+    "dev:backend": "node apps/cli/dist/cli.js dev start",
+    "dev:seed": "node apps/cli/dist/cli.js dev seed",
     "release": "node scripts/release.mjs",
     "dev:plugin": "npm run build -w @supasync/obsidian && node scripts/install-test-vault.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.15.17",
     "esbuild": "0.25.5",
+    "fake-indexeddb": "6.2.4",
     "fast-check": "^4.3.0",
     "typescript": "^5.8.3",
     "vitest": "^3.2.4"
   },
   "engines": {
     "node": ">=22"
+  },
+  "dependencies": {
+    "supasync": "^0.3.0"
   }
 }

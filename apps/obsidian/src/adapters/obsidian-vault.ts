@@ -38,13 +38,25 @@ export class ObsidianVaultAdapter implements VaultAdapter {
     return new Uint8Array(await this.app.vault.readBinary(file));
   }
 
-  async writeText(path: string, text: string): Promise<void> {
+  async writeText(
+    path: string,
+    text: string,
+    expected?: string | null,
+  ): Promise<void> {
     const normalized = normalizePath(path);
     const file = this.app.vault.getFileByPath(normalized);
     if (file) {
-      await this.app.vault.process(file, () => text);
+      await this.app.vault.process(file, (current) => {
+        if (expected !== undefined && current !== expected)
+          throw new Error(
+            "Local file changed while applying; retrying preserves the edit",
+          );
+        return text;
+      });
       return;
     }
+    if (expected !== undefined && expected !== null)
+      throw new Error("Local file disappeared while applying");
     await this.ensureFolder(normalized);
     await this.app.vault.create(normalized, text);
   }
@@ -56,7 +68,10 @@ export class ObsidianVaultAdapter implements VaultAdapter {
     copy.set(bytes);
     const buffer = copy.buffer;
     if (file) {
-      await this.app.vault.modifyBinary(file, buffer);
+      // Obsidian has no binary compare-and-swap API. Retain the exact old file
+      // in vault-local trash, then create without overwriting any competing create.
+      await this.app.vault.trash(file, false);
+      await this.app.vault.createBinary(normalized, buffer);
       return;
     }
     await this.ensureFolder(normalized);
@@ -65,7 +80,7 @@ export class ObsidianVaultAdapter implements VaultAdapter {
 
   async remove(path: string): Promise<void> {
     const file = this.app.vault.getAbstractFileByPath(normalizePath(path));
-    if (file) await this.app.vault.delete(file);
+    if (file) await this.app.vault.trash(file, false);
   }
 
   async mkdir(path: string): Promise<void> {

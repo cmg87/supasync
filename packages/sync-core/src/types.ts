@@ -13,7 +13,11 @@ export interface VaultAdapter {
   exists(path: string): Promise<boolean>;
   readText(path: string): Promise<string>;
   readBytes(path: string): Promise<Uint8Array>;
-  writeText(path: string, text: string): Promise<void>;
+  writeText(
+    path: string,
+    text: string,
+    expected?: string | null,
+  ): Promise<void>;
   writeBytes(path: string, bytes: Uint8Array): Promise<void>;
   remove(path: string): Promise<void>;
   mkdir(path: string): Promise<void>;
@@ -44,6 +48,7 @@ export type OutboxRow = {
 };
 
 export type ApplyIntent = {
+  fromPath?: string;
   path: string;
   beforeHash: string | null;
   afterHash: string | null;
@@ -54,7 +59,6 @@ export type ApplyIntent = {
 export type MetaState = {
   installationId: string;
   clientId: string;
-  generation: number;
   vaultId: string | null;
   serverEpoch: string | null;
   receivedCursor: Seq;
@@ -81,7 +85,7 @@ export interface LocalStore {
 }
 
 export type SyncApi = {
-  readBlob?(blobId: string): Promise<Uint8Array>;
+  readBlob(blobId: string): Promise<Uint8Array>;
   capabilities(vaultId: string): Promise<{
     serverEpoch: string;
     headSeq: string;
@@ -102,31 +106,20 @@ export type SyncApi = {
   beginSnapshot(input: {
     vaultId: string;
     clientId: string;
-    clientGeneration: number;
   }): Promise<import("@supasync/protocol").SnapshotBegin>;
   listSnapshot(input: {
     snapshotId: string;
     afterEntryId?: string;
     limit?: number;
-  }): Promise<{ items: import("@supasync/protocol").SnapshotItem[]; nextCursor: string | null; exhausted: boolean }>;
-  getBodies(vaultId: string, sha256s: string[]): Promise<{ bodies: Array<{ sha256: string; text: string; byteLength: number }> }>;
-  ackApplied(input: {
-    vaultId: string;
-    clientId: string;
-    clientGeneration: number;
-    appliedSeq: string;
-  }): Promise<unknown>;
-  beginBlobUpload(input: {
-    vaultId: string;
-    expectedSha256: string;
-    expectedLength: number;
-    mimeHint?: string;
-  }): Promise<Record<string, unknown>>;
-  finalizeBlob(input: { vaultId: string; blobId: string }): Promise<{ blobId: string; state: string }>;
-  getBlobDownload(input: {
-    vaultId: string;
-    blobId: string;
-  }): Promise<{ transfer: { url: string; method: string; headers: Record<string, string> }; verifiedSha256: string; verifiedLength: number }>;
-  renameTree(input: Record<string, unknown>): Promise<unknown>;
-  deleteTree(input: Record<string, unknown>): Promise<unknown>;
+  }): Promise<{
+    items: import("@supasync/protocol").SnapshotItem[];
+    nextCursor: string | null;
+    exhausted: boolean;
+  }>;
+  getBodies(
+    vaultId: string,
+    sha256s: string[],
+  ): Promise<{
+    bodies: Array<{ sha256: string; text: string; byteLength: number }>;
+  }>;
 };

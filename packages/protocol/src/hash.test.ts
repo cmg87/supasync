@@ -51,7 +51,6 @@ describe("operation envelopes", () => {
       serverEpoch: "epoch",
       vaultId: "vault",
       clientId: "client",
-      clientGeneration: 1,
       operationId: "op",
       type: "create",
       payload: { path: "a.md", textSha256: "abc" },
