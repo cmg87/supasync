@@ -573,6 +573,14 @@ export class SyncEngine {
       await this.remember(rev, null);
       return;
     }
+    if (row?.deleted) {
+      // A local deletion can race a remote update or rename. The queued delete
+      // still declares its older base revision and will be rejected normally.
+      // Restore the competing remote state first so no content is discarded and
+      // reconciliation never tries to read the intentionally missing local file.
+      await this.applyRevision(rev, report, false);
+      return;
+    }
     if (!row) {
       await this.applyRevision(rev, report, false);
       return;

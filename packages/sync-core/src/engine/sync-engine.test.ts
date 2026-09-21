@@ -387,6 +387,32 @@ it("keeps a local edit made while its earlier mutation is in flight", async () =
   expect(texts).toContain("second");
 });
 
+it("preserves a remote rename that races a queued local deletion", async () => {
+  const backend = new MemoryBackend();
+  const mobile = await client("mobile", backend, new MemoryVault());
+  const desktop = await client("desktop", backend, new MemoryVault());
+  await mobile.vault.writeText("Untitled 1.md", "");
+  await mobile.engine.cycle();
+  await desktop.engine.cycle();
+
+  await desktop.vault.remove("Untitled 1.md");
+  expect(await desktop.engine.deleteLocal("Untitled 1.md")).toBe(true);
+  await mobile.vault.rename("Untitled 1.md", "Mobile test.md");
+  expect(
+    await mobile.engine.renameLocal("Untitled 1.md", "Mobile test.md"),
+  ).toBe(true);
+  expect((await mobile.engine.cycle()).errors).toEqual([]);
+
+  const conflicted = await desktop.engine.cycle();
+  expect(conflicted.errors).toEqual(["BASE_CONFLICT"]);
+  expect(await desktop.vault.readText("Mobile test.md")).toBe("");
+  expect(await desktop.store.listOutbox()).toEqual([]);
+  expect((await desktop.store.getMeta()).appliedCursor).toBe(
+    (await backend.capabilities()).headSeq,
+  );
+  expect((await desktop.engine.cycle()).errors).toEqual([]);
+});
+
 it("uses per-file revisions even when other files advance the journal", async () => {
   const backend = new MemoryBackend(),
     a = await client("a", backend, new MemoryVault());
