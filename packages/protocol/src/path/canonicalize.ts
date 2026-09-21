@@ -67,10 +67,10 @@ function validateComponent(raw: string): string {
       },
     );
   }
-  if (raw.includes("/") || raw.includes("\\") || raw.includes(":")) {
+  if (/[\\/:*?"<>|]/u.test(raw)) {
     throw new ProtocolError(
       "INVALID_PATH",
-      "path component contains a reserved separator",
+      "path component contains a cross-platform reserved character",
       {
         component: raw,
       },

@@ -12,10 +12,11 @@ export class ObsidianVaultAdapter implements VaultAdapter {
     const out: VaultStat[] = [];
     for (const file of this.app.vault.getAllLoadedFiles()) {
       const path = file.path;
+      if (!path || path === "/") continue;
       if ("extension" in file) {
         const tfile = file as TFile;
         out.push({ path, kind: "file", byteLength: tfile.stat.size });
-      } else if (path) {
+      } else {
         out.push({ path, kind: "folder", byteLength: 0 });
       }
     }

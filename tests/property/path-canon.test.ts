@@ -16,7 +16,19 @@ describe("pathcanon-1 properties", () => {
   });
 
   it("rejects traversal and absolute paths", () => {
-    const bad = ["../x.md", "/x.md", "a/../b.md", "a//b.md", "CON.md"];
+    const bad = [
+      "../x.md",
+      "/x.md",
+      "a/../b.md",
+      "a//b.md",
+      "CON.md",
+      "question?.md",
+      "star*.md",
+      'quote".md',
+      "less<than.md",
+      "greater>than.md",
+      "pipe|name.md",
+    ];
     for (const input of bad) {
       expect(() => canonicalizePath(input)).toThrow(ProtocolError);
     }

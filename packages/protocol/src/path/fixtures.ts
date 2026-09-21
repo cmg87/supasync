@@ -106,6 +106,31 @@ export const PATH_CANON_FIXTURES: PathFixture[] = [
     expect: "reject",
   },
   {
+    name: "question mark",
+    input: "question?.md",
+    expect: "reject",
+  },
+  {
+    name: "asterisk",
+    input: "star*.md",
+    expect: "reject",
+  },
+  {
+    name: "double quote",
+    input: 'quote".md',
+    expect: "reject",
+  },
+  {
+    name: "angle bracket",
+    input: "less<than.md",
+    expect: "reject",
+  },
+  {
+    name: "pipe",
+    input: "pipe|name.md",
+    expect: "reject",
+  },
+  {
     name: "nul",
     input: "no\u0000te.md",
     expect: "reject",

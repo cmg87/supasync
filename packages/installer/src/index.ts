@@ -313,6 +313,12 @@ export async function prepareBackend(
 }
 export async function migrateBackend(state: InstallState, assets: string) {
   const sql = await readFile(join(assets, "schema.sql"), "utf8");
+  const upgrade = await readFile(join(assets, "schema-upgrade.sql"), "utf8").catch(
+    (error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return "";
+      throw error;
+    },
+  );
   // A successful marker is stored inside the same transaction as schema installation.
   const applied = await compose(state, [
     "exec",
@@ -344,6 +350,23 @@ export async function migrateBackend(state: InstallState, assets: string) {
     if (version.trim() !== "3")
       throw new Error(
         "Unsupported schema version; back up before a versioned migration",
+      );
+    if (upgrade)
+      await compose(
+        state,
+        [
+          "exec",
+          "-T",
+          "db",
+          "psql",
+          "-U",
+          "postgres",
+          "-d",
+          "postgres",
+          "-v",
+          "ON_ERROR_STOP=1",
+        ],
+        `begin;\n${upgrade}\ncommit;`,
       );
     return;
   }

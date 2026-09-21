@@ -15,4 +15,4 @@ The current architecture is documented in docs/ARCHITECTURE.md. The original v1/
 
 Do not interpret historical v2 verification as evidence for v3. No real vault or production backend was used for this refactor.
 
-Verification: 80 local tests, 26 disposable PostgreSQL checks, 20 HTTP integration tests, and 8 pgTAP authorization checks. The installer smoke test verified a binary round trip and restored account access, note identities, and attachment bytes into a second empty backend. Real Obsidian desktop/mobile and private HTTPS device behavior remain unverified.
+Verification: 93 local tests, 26 disposable PostgreSQL checks, 25 HTTP integration tests, and 8 pgTAP authorization checks. The installer smoke test verified a binary round trip and restored account access, note identities, and attachment bytes into a second empty backend. Real Obsidian desktop/mobile and private HTTPS device behavior remain unverified.

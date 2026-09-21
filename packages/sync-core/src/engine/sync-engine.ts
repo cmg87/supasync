@@ -17,9 +17,22 @@ import { conflictCopyPath } from "../reconcile/conflict-path.ts";
 import type {
   LocalStore,
   ManifestRow,
+  OutboxRow,
   SyncApi,
   VaultAdapter,
 } from "../types.ts";
+
+const REJECTED_OUTBOX_CACHE_PREFIX = "rejected-outbox:";
+const UNSUPPORTED_INTENT_CACHE_PREFIX = "unsupported-intent:";
+const UNSUPPORTED_REVISION_CACHE_PREFIX = "unsupported-revision:";
+
+function pathError(error: unknown): string {
+  return error instanceof ProtocolError
+    ? `${error.code}: ${error.message}`
+    : error instanceof Error
+      ? error.message
+      : String(error);
+}
 
 export type EngineOptions = {
   api: SyncApi;
@@ -149,15 +162,27 @@ export class SyncEngine {
       (a, b) =>
         a.revision.path.split("/").length - b.revision.path.split("/").length,
     );
+    const portableItems = [] as typeof page.items;
+    for (const item of page.items) {
+      if (await this.acceptRemotePath(item.revision, report))
+        portableItems.push(item);
+    }
     if (localFiles.length === 0) {
-      for (const item of page.items) {
+      for (const item of portableItems) {
         await this.applyRevision(item.revision, report, true);
       }
     } else {
-      for (const item of page.items) {
+      for (const item of portableItems) {
         const local = localFiles.find(
-          (file) =>
-            canonicalizePath(file.path).pathKey === item.revision.pathKey,
+          (file) => {
+            try {
+              return (
+                canonicalizePath(file.path).pathKey === item.revision.pathKey
+              );
+            } catch {
+              return false;
+            }
+          },
         );
         if (!local) {
           await this.applyRevision(item.revision, report, true);
@@ -190,15 +215,26 @@ export class SyncEngine {
   private async captureLocalChanges(report: SyncReport): Promise<void> {
     const listed = await this.opts.vault.list();
     const manifest = await this.opts.store.getManifest();
-    const byPath = new Map(
-      [...manifest.values()]
-        .filter((row) => !row.deleted)
-        .map((row) => [row.path, row]),
-    );
+    const byPath = new Map<string, ManifestRow>();
+    for (const row of manifest.values()) {
+      if (row.deleted) continue;
+      try {
+        byPath.set(canonicalizePath(row.path).display, row);
+      } catch {
+        // A local-only unsupported rename may be corrected by a later event.
+      }
+    }
     const pending = await this.opts.store.listOutbox();
-    const pendingPaths = new Set(
-      pending.map((p) => (p.envelope as CommitEnvelope).payload.path),
-    );
+    const pendingPaths = new Set<string>();
+    for (const row of pending) {
+      const path = (row.envelope as CommitEnvelope).payload.path;
+      if (typeof path !== "string") continue;
+      try {
+        pendingPaths.add(canonicalizePath(path).display);
+      } catch {
+        // Invalid legacy requests are recovered before push, not used for matching.
+      }
+    }
     const pendingIds = new Set(
       pending.map((p) => (p.envelope as CommitEnvelope).entryId),
     );
@@ -210,7 +246,16 @@ export class SyncEngine {
     for (const stat of listed.sort(
       (a, b) => a.path.split("/").length - b.path.split("/").length,
     )) {
-      if (pendingPaths.has(stat.path)) continue;
+      if (stat.kind === "folder" && (!stat.path || stat.path === "/")) continue;
+      if (isExcluded(stat.path, this.opts.vault.configDir())) continue;
+      let canon: ReturnType<typeof canonicalizePath>;
+      try {
+        canon = canonicalizePath(stat.path);
+      } catch (error) {
+        report.errors.push(`${stat.path || "<root>"}: ${pathError(error)}`);
+        continue;
+      }
+      if (pendingPaths.has(canon.display)) continue;
       if (
         events.some(
           (e) =>
@@ -220,11 +265,8 @@ export class SyncEngine {
         )
       )
         continue;
-      if (
-        stat.kind === "folder" &&
-        !isExcluded(stat.path, this.opts.vault.configDir())
-      ) {
-        if (!byPath.has(stat.path)) {
+      if (stat.kind === "folder") {
+        if (!byPath.has(canon.display)) {
           const meta = await this.opts.store.getMeta();
           const operationId = crypto.randomUUID();
           await this.opts.store.putOutbox({
@@ -233,20 +275,17 @@ export class SyncEngine {
               operationId,
               type: "create",
               entryId: crypto.randomUUID(),
-              payload: { path: stat.path, kind: "folder" },
+              payload: { path: canon.display, kind: "folder" },
             }),
             extras: {},
             status: "queued",
             sentHash: null,
           });
+          pendingPaths.add(canon.display);
         }
         continue;
       }
-      if (
-        stat.kind !== "file" ||
-        isExcluded(stat.path, this.opts.vault.configDir())
-      )
-        continue;
+      if (stat.kind !== "file") continue;
       const limit = isMarkdownPath(stat.path)
         ? DEFAULT_LIMITS.maxTextBytes
         : DEFAULT_LIMITS.maxBlobBytes;
@@ -254,7 +293,6 @@ export class SyncEngine {
         report.errors.push(`File exceeds supported size limit: ${stat.path}`);
         continue;
       }
-      const canon = canonicalizePath(stat.path);
       const row =
         byPath.get(canon.display) ??
         [...byPath.values()].find(
@@ -460,7 +498,8 @@ export class SyncEngine {
       meta.receivedCursor = page.nextCursor;
       await this.opts.store.putMeta(meta);
       for (const rev of page.revisions) {
-        await this.reconcileRevision(rev, report);
+        if (await this.acceptRemotePath(rev, report))
+          await this.reconcileRevision(rev, report);
         count++;
       }
       after = page.nextCursor;
@@ -469,6 +508,29 @@ export class SyncEngine {
       if (page.exhausted) break;
     }
     return count;
+  }
+
+  private async acceptRemotePath(
+    rev: RevisionRecord,
+    report: SyncReport,
+  ): Promise<boolean> {
+    try {
+      canonicalizePath(rev.path);
+      return true;
+    } catch (error) {
+      const key = `${UNSUPPORTED_REVISION_CACHE_PREFIX}${rev.seq}`;
+      if ((await this.opts.store.getCache(key)) === null) {
+        await this.opts.store.putCache(key, {
+          reason: "unsupported-remote-path",
+          error: pathError(error),
+          revision: rev,
+        });
+      }
+      report.errors.push(
+        `Quarantined unsupported remote path at revision ${rev.seq}: ${rev.path}`,
+      );
+      return false;
+    }
   }
 
   private async reconcileRevision(
@@ -795,6 +857,10 @@ export class SyncEngine {
     let pushed = 0;
     for (const row of rows) {
       if (row.status === "done") continue;
+      if (this.isLegacyRootFolderCreate(row)) {
+        await this.recoverLegacyRootFolderCreate(row, report);
+        continue;
+      }
       await this.opts.store.putOutbox({ ...row, status: "in_flight" });
       try {
         const result = await this.opts.api.commit(
@@ -854,6 +920,8 @@ export class SyncEngine {
         }
         await this.opts.store.deleteOutbox(row.operationId);
       } catch (error) {
+        if (await this.retireRejectedUnsupportedPath(row, error, report))
+          continue;
         const latest =
           (await this.opts.store.listOutbox()).find(
             (p) => p.operationId === row.operationId,
@@ -867,8 +935,102 @@ export class SyncEngine {
     return pushed;
   }
 
+  private async retireRejectedUnsupportedPath(
+    row: OutboxRow,
+    error: unknown,
+    report: SyncReport,
+  ): Promise<boolean> {
+    if (!(error instanceof ProtocolError) || error.code !== "INVALID_PATH")
+      return false;
+    const env = row.envelope as CommitEnvelope;
+    const path = env.payload.path;
+    if (typeof path !== "string") return false;
+    try {
+      canonicalizePath(path);
+      return false;
+    } catch {}
+    const key = `${REJECTED_OUTBOX_CACHE_PREFIX}${row.operationId}`;
+    try {
+      if ((await this.opts.store.getCache(key)) === null) {
+        await this.opts.store.putCache(key, {
+          reason: "unsupported-path-request",
+          error: pathError(error),
+          outbox: row,
+        });
+      }
+      await this.opts.store.deleteOutbox(row.operationId);
+      if (env.type === "create" && env.entryId) {
+        const manifest = (await this.opts.store.getManifest()).get(env.entryId);
+        if (manifest?.remoteSeq === seqZero())
+          await this.opts.store.deleteManifest(env.entryId);
+      }
+      report.errors.push(`Retired unsupported queued path: ${path}`);
+      return true;
+    } catch (recoveryError) {
+      report.errors.push(
+        `Unsupported-path queue recovery failed: ${path}: ${pathError(
+          recoveryError,
+        )}`,
+      );
+      return false;
+    }
+  }
+
+  private isLegacyRootFolderCreate(row: OutboxRow): boolean {
+    const env = row.envelope as Partial<CommitEnvelope>;
+    if (
+      env.vaultId !== this.opts.vaultId ||
+      env.type !== "create" ||
+      !env.payload ||
+      env.payload.kind !== "folder" ||
+      (env.payload.path !== "/" && env.payload.path !== "")
+    )
+      return false;
+    return Object.keys(env.payload).every(
+      (key) => key === "path" || key === "kind",
+    );
+  }
+
+  private async recoverLegacyRootFolderCreate(
+    row: OutboxRow,
+    report: SyncReport,
+  ): Promise<void> {
+    const key = `${REJECTED_OUTBOX_CACHE_PREFIX}${row.operationId}`;
+    try {
+      const archived = await this.opts.store.getCache(key);
+      if (archived === null) {
+        await this.opts.store.putCache(key, {
+          reason: "invalid-root-folder-create",
+          outbox: row,
+        });
+      }
+      await this.opts.store.deleteOutbox(row.operationId);
+    } catch (error) {
+      report.errors.push(
+        `Root-folder queue recovery failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+
   private async recoverIntents(report: SyncReport): Promise<void> {
     for (const intent of await this.opts.store.listIntents()) {
+      try {
+        canonicalizePath(intent.path);
+      } catch (error) {
+        const key = `${UNSUPPORTED_INTENT_CACHE_PREFIX}${intent.entryId}:${intent.seq}`;
+        if ((await this.opts.store.getCache(key)) === null) {
+          await this.opts.store.putCache(key, {
+            reason: "unsupported-apply-path",
+            error: pathError(error),
+            intent,
+          });
+        }
+        await this.opts.store.deleteIntent(intent.path);
+        report.errors.push(`Retired unsupported apply intent: ${intent.path}`);
+        continue;
+      }
       if (intent.fromPath) {
         if (
           !(await this.opts.vault.exists(intent.fromPath)) &&
@@ -942,6 +1104,22 @@ export class SyncEngine {
   async renameLocal(from: string, to: string): Promise<boolean> {
     const meta = await this.opts.store.getMeta();
     const original = [...(await this.opts.store.getManifest()).values()];
+    let canonicalTo: string;
+    try {
+      canonicalTo = canonicalizePath(to).display;
+    } catch {
+      for (const row of original) {
+        if (
+          !row.deleted &&
+          (row.path === from || row.path.startsWith(`${from}/`))
+        )
+          await this.opts.store.putManifest({
+            ...row,
+            path: to + row.path.slice(from.length),
+          });
+      }
+      return true;
+    }
     const pending = new Set(
       (await this.opts.store.listOutbox()).map(
         (x) => (x.envelope as CommitEnvelope).entryId,
@@ -962,7 +1140,9 @@ export class SyncEngine {
         (row.path !== from && !row.path.startsWith(`${from}/`))
       )
         continue;
-      const path = to + row.path.slice(from.length);
+      const path = canonicalizePath(
+        canonicalTo + row.path.slice(from.length),
+      ).display;
       if (row.path === from) {
         const operationId = crypto.randomUUID();
         await this.opts.store.putOutbox({

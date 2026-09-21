@@ -77,7 +77,7 @@ create function supasync_private.path_key(p text) returns text
 language plpgsql immutable set search_path='' as $$
 declare c text; n text; result text[]:=array[]::text[];
 begin
- if p is null or p='' or p like '/%' or position(chr(92) in p)>0 or p ~ '[[:cntrl:]:]' or octet_length(p)>1024 then raise exception 'INVALID_PATH'; end if;
+ if p is null or p='' or p like '/%' or position(chr(92) in p)>0 or p ~ '[[:cntrl:]:*?"<>|]' or octet_length(p)>1024 then raise exception 'INVALID_PATH'; end if;
  foreach c in array string_to_array(rtrim(p,'/'),'/') loop
   n:=normalize(c,NFC);
   if n in ('','.','..') or right(n,1) in (' ','.') or octet_length(n)>255

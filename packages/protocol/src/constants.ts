@@ -1,6 +1,6 @@
 export const PLUGIN_ID = "supasync";
 export const PROTOCOL_VERSION = 3;
-export const PATH_CANON_VERSION = "pathcanon-3";
+export const PATH_CANON_VERSION = "pathcanon-4";
 export const MIN_OBSIDIAN_VERSION = "1.11.4";
 
 export const DEFAULT_LIMITS = {

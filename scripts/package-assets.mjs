@@ -14,6 +14,10 @@ await copyFile(
   new URL("schema.sql", assets),
 );
 await copyFile(
+  new URL("supabase/migrations/20260921030000_portable_paths.sql", root),
+  new URL("schema-upgrade.sql", assets),
+);
+await copyFile(
   new URL("THIRD_PARTY_NOTICES.md", root),
   new URL("apps/cli/THIRD_PARTY_NOTICES.md", root),
 );
